@@ -1,6 +1,7 @@
 beautifulsoup4>=4.12,<5
 openai>=1.50,<2
-ortools>=9.10,<10
+ortools==9.11.4210
+protobuf==5.26.1
 pandas>=2.2,<3
 requests>=2.32,<3
 streamlit==1.41.1
