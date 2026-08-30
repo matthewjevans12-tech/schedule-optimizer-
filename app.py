@@ -932,6 +932,21 @@ class AdvancedNonConferenceOptimizer(NonConferenceOptimizer):
                 return []
             model.Add(parity_bad[key] == 0)
 
+        # An explicitly scoped national parity request is a REQUIREMENT, not a
+        # preference. Example: “make all conferences even in Weeks 0, 1 and 2.”
+        # Every requested conference/week is therefore a hard constraint. The
+        # objective below only decides which feasible solution moves the fewest
+        # games and keeps those moves closest to their original dates.
+        hard_national_parity_scope = (
+            mode == "national"
+            and bool(intent.target_weeks or intent.target_week is not None)
+            and bool(intent.all_conferences or intent.conferences or intent.conference)
+        )
+        if hard_national_parity_scope:
+            for key in sorted(scope_keys):
+                if key in parity_bad:
+                    model.Add(parity_bad[key] == 0)
+
         changed_vars = []
         distance_terms = []
         for game in season_games:
@@ -953,7 +968,10 @@ class AdvancedNonConferenceOptimizer(NonConferenceOptimizer):
         elif mode in {"fcs_balance", "controlled_balance"}:
             model.Add(sum(changed_vars) <= 18)
         elif mode == "national":
-            model.Add(sum(changed_vars) <= 30)
+            # Explicit multi-conference parity requests may legitimately require
+            # a larger repair chain. Keep a guardrail, but do not prematurely
+            # force the solver to leave requested parity issues unresolved.
+            model.Add(sum(changed_vars) <= (60 if hard_national_parity_scope else 30))
 
         objective_terms = []
         # Direct administrator-requested moves use a strict minimal-intervention
@@ -973,11 +991,18 @@ class AdvancedNonConferenceOptimizer(NonConferenceOptimizer):
             # National/multi-week requests heavily prioritize the exact scope the
             # administrator named, while still discouraging parity problems elsewhere.
             scoped_bad_vars = [v for k, v in parity_bad.items() if k in scope_keys]
-            if mode == "national" and scoped_bad_vars:
+            if mode == "national" and scoped_bad_vars and not hard_national_parity_scope:
                 objective_terms.append((self.PARITY_PENALTY * 5) * sum(scoped_bad_vars))
-            objective_terms.append(self.PARITY_PENALTY * sum(parity_bad.values()))
-            objective_terms.append(self.MOVE_PENALTY * sum(changed_vars))
-            objective_terms.append(self.DISTANCE_PENALTY * sum(distance_terms))
+            # Once explicit scope has been made a hard constraint, minimizing
+            # schedule disruption becomes the primary optimization objective.
+            if hard_national_parity_scope:
+                objective_terms.append(1_000_000 * sum(changed_vars))
+                objective_terms.append(100 * sum(distance_terms))
+                objective_terms.append(self.PARITY_PENALTY * sum(parity_bad.values()))
+            else:
+                objective_terms.append(self.PARITY_PENALTY * sum(parity_bad.values()))
+                objective_terms.append(self.MOVE_PENALTY * sum(changed_vars))
+                objective_terms.append(self.DISTANCE_PENALTY * sum(distance_terms))
 
         if mode == "fcs_balance":
             fcs_games = [g for g in season_games if self._is_fbs_fcs(g)]
@@ -1020,6 +1045,35 @@ class AdvancedNonConferenceOptimizer(NonConferenceOptimizer):
         self.last_solver_seconds = time.perf_counter() - started
         self.last_solver_status = solver.StatusName(status)
         if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            if hard_national_parity_scope:
+                current_issues = self.parity_issue_details(
+                    self.store.copy_games(), season, scope_weeks, scope_conferences
+                )
+                scope_label = f"{', '.join(scope_conferences)} · Weeks {', '.join(str(w) for w in scope_weeks)}"
+                return [Solution(
+                    title="Requested parity target is infeasible",
+                    moves=[],
+                    score=0.0,
+                    warnings=[
+                        "The solver could not make every requested conference/week even under the currently loaded availability, moveability, and one-game-per-team-per-week constraints."
+                    ],
+                    explanation=(
+                        f"No feasible schedule was found for {scope_label}. Nothing was partially applied. "
+                        "Review the remaining odd conference/week states below or relax one constraint and try again."
+                    ),
+                    metadata={
+                        "mode": "national",
+                        "solver_status": self.last_solver_status,
+                        "solver_seconds": round(self.last_solver_seconds, 3),
+                        "hard_scope": True,
+                        "scope_before_bad": len(current_issues),
+                        "scope_after_bad": len(current_issues),
+                        "scope_conferences": scope_conferences,
+                        "scope_weeks": scope_weeks,
+                        "unresolved_issues": current_issues,
+                        "infeasible": True,
+                    },
+                )]
             return []
 
         after_games = self.store.copy_games()
@@ -1128,6 +1182,7 @@ class AdvancedNonConferenceOptimizer(NonConferenceOptimizer):
                 "scope_conferences": scope_conferences,
                 "scope_weeks": scope_weeks,
                 "status_is_optimal": status == cp_model.OPTIMAL,
+                "hard_scope": bool(hard_national_parity_scope),
                 "season": season,
                 "unresolved_issues": self.parity_issue_details(after_games, season, range(0, 14)),
             },
@@ -2993,12 +3048,14 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+ai_connected = bool(os.getenv("OPENAI_API_KEY"))
+ai_status = "AI INTENT CONNECTED" if ai_connected else "LOCAL INTENT MODE"
 st.markdown(
     '<div class="hero"><div>'
-    '<div class="hero-kicker">NATIONAL SCHEDULING COMMAND CENTER</div>'
-    '<div class="hero-title">Plan, test and optimize every non-conference move.</div>'
-    '<div class="hero-copy">A single operational workspace for future-game inventory, conference parity, buy-game matching, A4 requirements and minimum-disruption schedule repair.</div>'
-    '</div><div><span class="status-chip good">● CP-SAT READY</span></div></div>',
+    '<div class="hero-kicker">NON-CONFERENCE SCHEDULING</div>'
+    '<div class="hero-title">Make the game you want possible.</div>'
+    '<div class="hero-copy">Describe the scheduling problem. The optimizer finds the fewest changes required to solve it.</div>'
+    f'</div><div><span class="status-chip good">● {ai_status}</span></div></div>',
     unsafe_allow_html=True,
 )
 
@@ -3040,25 +3097,15 @@ optimizer = AdvancedNonConferenceOptimizer(store)
 if source_mode == "Real public schedule data":
     fbs_count = int((real_teams_df["subdivision"] == "FBS").sum())
     fcs_count = int((real_teams_df["subdivision"] == "FCS").sum())
-    commitments = len(year_games)
-    metrics = [
-        ("Season", str(season), "Active workspace"),
-        ("Teams", f"{len(real_teams_df):,}", f"{fbs_count} FBS · {fcs_count} FCS"),
-        ("Known games", f"{commitments:,}", "Dated + TBA commitments"),
-        ("Data status", "PUBLIC TEST", "Authoritative intent data not connected"),
-    ]
+    data_note = f"{len(real_teams_df):,} teams · {len(year_games):,} known {season} games"
 else:
-    metrics = [
-        ("Season", str(season), "Synthetic test year"),
-        ("Teams", f"{len(store.teams):,}", "Demo universe"),
-        ("Known games", f"{len(store.games):,}", "Synthetic commitments"),
-        ("Data status", "DEMO", "Optimizer test mode"),
-    ]
+    data_note = f"{len(store.teams):,} demo teams · {len(store.games):,} games"
 st.markdown(
-    '<div class="metric-strip">' + ''.join(
-        f'<div class="metric-card"><div class="metric-label">{_html_escape(a)}</div><div class="metric-value">{_html_escape(b)}</div><div class="metric-sub">{_html_escape(c)}</div></div>'
-        for a,b,c in metrics
-    ) + '</div>',
+    f'<div class="metric-strip" style="grid-template-columns:repeat(3,minmax(0,1fr))">'
+    f'<div class="metric-card"><div class="metric-label">SEASON</div><div class="metric-value">{season}</div><div class="metric-sub">Active workspace</div></div>'
+    f'<div class="metric-card"><div class="metric-label">DATA</div><div class="metric-value">{"PUBLIC TEST" if source_mode == "Real public schedule data" else "DEMO"}</div><div class="metric-sub">{_html_escape(data_note)}</div></div>'
+    f'<div class="metric-card"><div class="metric-label">INTENT LAYER</div><div class="metric-value">{"OPENAI" if ai_connected else "LOCAL"}</div><div class="metric-sub">Natural-language request parsing</div></div>'
+    f'</div>',
     unsafe_allow_html=True,
 )
 
@@ -3265,310 +3312,302 @@ def render_solution(sol, idx: int):
         st.caption(f"{solver_status} · {solver_seconds}s · {getattr(optimizer, 'engine_name', 'Optimizer')}")
 
 
-# ---- Product navigation ----
-tab_chat, tab_calendar, tab_opt, tab_health, tab_schedule, tab_needs = st.tabs([
-    "Ask Optimizer", "Schedule Board", "Optimization Center", "Conference Health", "Schedule Data", "Open Market"
+
+
+def render_compact_recommendation(sol: Solution, rank: int = 1, detail_label: str = "Details") -> None:
+    """User-first recommendation. Keep solver mechanics behind an expander."""
+    md = getattr(sol, "metadata", {}) or {}
+    infeasible = bool(md.get("infeasible"))
+    moves = list(sol.moves or [])
+    mode = str(md.get("mode", ""))
+
+    if infeasible:
+        _render_move_outcome("conflict", "Cannot satisfy every requested condition", sol.explanation)
+        issues = md.get("unresolved_issues") or []
+        if issues:
+            st.markdown('<div class="section-kicker">WHAT IS STILL BLOCKING THE REQUEST</div>', unsafe_allow_html=True)
+            rows = []
+            for issue in issues[:20]:
+                rows.append({
+                    "Conference / Week": f"{issue.get('conference')} · W{issue.get('week')}",
+                    "Available": issue.get("available"),
+                    "Non-conf": issue.get("nonconf_count"),
+                    "Needed": "Move one conference team into or out of the week",
+                })
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        return
+
+    if not moves:
+        _render_move_outcome("success", sol.title or "No move required", sol.explanation)
+        return
+
+    additional = max(0, len(moves) - 1) if mode == "move" else None
+    if mode == "move":
+        headline = "Clean move" if additional == 0 else "Minimum repair path"
+        sub = "1 game moved · 0 secondary changes" if additional == 0 else f"{len(moves)} games moved · {additional} secondary change{'s' if additional != 1 else ''}"
+    elif mode == "national":
+        sb = md.get("scope_before_bad")
+        sa = md.get("scope_after_bad")
+        headline = "Requested parity solved" if sa == 0 else (sol.title or "Best available path")
+        sub = f"{len(moves)} game{'s' if len(moves) != 1 else ''} moved"
+        if sb is not None and sa is not None:
+            sub += f" · requested odd slots {sb} → {sa}"
+    else:
+        headline = sol.title or "Recommended option"
+        sub = f"{len(moves)} game{'s' if len(moves) != 1 else ''} moved"
+
+    st.markdown(
+        f'<div class="result-card"><div class="result-head">'
+        f'<div><div class="result-rank">{"BEST OPTION" if rank == 1 else f"OPTION {rank}"}</div>'
+        f'<div class="result-title">{_html_escape(headline)}</div>'
+        f'<div class="result-summary">{_html_escape(sub)}</div></div>'
+        f'<div class="score-pill">{int(round(sol.score))}/100</div></div></div>',
+        unsafe_allow_html=True,
+    )
+    move_df = pd.DataFrame([{
+        "Game": f"{m.away_team} @ {m.home_team}",
+        "Current": f"Week {m.from_week}",
+        "Proposed": f"Week {m.to_week}",
+    } for m in moves])
+    st.dataframe(move_df, use_container_width=True, hide_index=True)
+
+    with st.expander(detail_label, expanded=False):
+        if sol.explanation:
+            st.write(sol.explanation)
+        if sol.warnings:
+            for warning in sol.warnings:
+                st.caption(warning)
+        if sol.parity_after:
+            changed = []
+            for key in sorted(set(sol.parity_before) | set(sol.parity_after)):
+                before = sol.parity_before.get(key, "—")
+                after = sol.parity_after.get(key, "—")
+                if before != after:
+                    changed.append({"Conference / Week": key, "Before": before, "After": after})
+            if changed:
+                st.dataframe(pd.DataFrame(changed), use_container_width=True, hide_index=True)
+        if md.get("solver_status"):
+            st.caption(f"{md.get('solver_status')} · {md.get('solver_seconds', '—')}s · {optimizer.engine_name}")
+
+
+def run_user_intent(intent: Intent, run_optimizer: AdvancedNonConferenceOptimizer | None = None) -> List[Solution]:
+    engine = run_optimizer or optimizer
+    return engine.solve(intent)
+
+
+def render_ranked_solutions(solutions: List[Solution], max_options: int = 3) -> None:
+    if not solutions:
+        _render_move_outcome("conflict", "No feasible option found", "The loaded schedule does not contain a feasible path under the current constraints.")
+        return
+    for i, sol in enumerate(solutions[:max_options], start=1):
+        render_compact_recommendation(sol, i)
+
+# ---- Streamlined product navigation ----
+tab_ask, tab_repair, tab_find, tab_schedules = st.tabs([
+    "Ask", "Repair a Game", "Find a Game", "Schedules"
 ])
 
-with tab_chat:
-    st.markdown('<div class="section-kicker">ASK THE OPTIMIZER</div><div class="section-title">What are you trying to accomplish?</div>', unsafe_allow_html=True)
-    if source_mode == "Demo":
-        helper = "Try: Move Georgia vs McNeese to Week 2 and solve the displaced Tarleton game without creating a new FBS parity problem."
+with tab_ask:
+    st.markdown(
+        '<div class="section-kicker">ASK</div>'
+        '<div class="section-title">What are you trying to accomplish?</div>'
+        '<div class="section-copy">Write it exactly the way you would explain the problem to another scheduler. The AI interprets the request; the optimization engine decides what is feasible.</div>',
+        unsafe_allow_html=True,
+    )
+    if ai_connected:
+        st.markdown('<span class="status-chip good">● OpenAI natural-language layer connected</span>', unsafe_allow_html=True)
     else:
-        helper = f"Ask naturally — for example: ‘Get the SEC even in Week 2,’ ‘Grambling needs to buy a game in 2029,’ or ‘Find Georgia an A4 opponent in {season}.’"
-    st.markdown(f'<div class="section-copy">{_html_escape(helper)}</div>', unsafe_allow_html=True)
+        st.markdown('<span class="status-chip neutral">● Local parser active · add OPENAI_API_KEY for full natural-language understanding</span>', unsafe_allow_html=True)
 
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-    for msg in st.session_state.messages:
+    examples = [
+        "Move Georgia–McNeese to Week 2 and make the fewest other changes possible.",
+        "Get the SEC even in Week 2.",
+        "Make all FBS conferences even in Weeks 0, 1 and 2 with the fewest game moves.",
+        f"Grambling needs an FBS guarantee game in {season}. What are the best options?",
+    ]
+    st.markdown(
+        '<div class="issue-grid" style="margin-top:12px">' + ''.join(
+            f'<div class="issue-card"><div class="issue-key">Try</div><div class="issue-games">{_html_escape(x)}</div></div>'
+            for x in examples
+        ) + '</div>',
+        unsafe_allow_html=True,
+    )
+
+    if "simple_messages" not in st.session_state:
+        st.session_state.simple_messages = []
+    for msg in st.session_state.simple_messages[-8:]:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    prompt = st.chat_input("Describe the scheduling problem…")
+    prompt = st.chat_input("Describe the scheduling problem…", key="streamlined_chat")
     if prompt:
-        st.session_state.messages.append({"role": "user", "content": prompt})
+        st.session_state.simple_messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
         intent, parser_name = parse_intent(prompt, store.teams.keys())
         if intent.season is None:
             intent.season = season
+        run_optimizer = optimizer
+        if source_mode == "Real public schedule data" and int(intent.season) != int(season):
+            run_store = build_real_store(real_teams_df, real_games_df, int(intent.season))
+            run_optimizer = AdvancedNonConferenceOptimizer(run_store, time_limit_seconds=6.0)
+        # Broad hard parity requests get a little more solve time because failure
+        # now means infeasible, not “best effort.”
+        if intent.action == "OPTIMIZE_NATIONAL" and (intent.target_weeks or intent.target_week is not None):
+            run_optimizer.time_limit_seconds = 8.0
+        started = time.perf_counter()
         with st.chat_message("assistant"):
-            run_optimizer = optimizer
-            if source_mode == "Real public schedule data" and intent.season != season:
-                run_store = build_real_store(real_teams_df, real_games_df, int(intent.season))
-                run_optimizer = AdvancedNonConferenceOptimizer(run_store)
-            started = time.perf_counter()
-            with st.spinner(f"Searching {intent.season} scheduling options…"):
+            with st.spinner("Finding the simplest feasible path…"):
                 solutions = run_optimizer.solve(intent)
             elapsed = time.perf_counter() - started
-            parser_label = "AI intent" if "openai" in parser_name.lower() else "Local intent"
-            st.caption(f"{parser_label} · Optimizer {elapsed:.2f}s")
-            if intent.action == "OPTIMIZE_NATIONAL" and (intent.target_weeks or intent.all_conferences or intent.conferences):
-                scope_bits = []
-                if intent.all_conferences:
-                    scope_bits.append("All FBS conferences")
-                elif intent.conferences:
-                    scope_bits.append(", ".join(intent.conferences))
-                if intent.target_weeks:
-                    scope_bits.append("Weeks " + ", ".join(str(w) for w in intent.target_weeks))
-                _render_move_outcome("info", "Optimization scope", " · ".join(scope_bits))
-            with st.expander("How the optimizer interpreted your request", expanded=False):
+            parser_label = "OpenAI" if "openai" in parser_name.lower() else "Local parser"
+            st.caption(f"{parser_label} · {run_optimizer.engine_name} · {elapsed:.2f}s")
+            render_ranked_solutions(solutions, 3)
+            with st.expander("How the request was interpreted", expanded=False):
                 st.json(intent.__dict__)
-            if not solutions:
-                _render_move_outcome("conflict", "No feasible result", "The optimizer could not satisfy the request with the currently loaded constraints.", "Public data does not yet include true school intent, contract flexibility or guarantee requirements.")
-            else:
-                _render_move_outcome("success", "Solution found", f"{len(solutions)} feasible option{'s' if len(solutions) != 1 else ''} evaluated and ranked.")
-                for i, sol in enumerate(solutions, start=1):
-                    render_solution(sol, i)
 
-with tab_calendar:
-    st.markdown('<div class="section-kicker">SCHEDULE BOARD</div><div class="section-title">See the season. Test the move.</div><div class="section-copy">Conference mode now includes a direct-manipulation Week 0–13 board: drag any game card straight to the week you want. The logo matrix below remains the team-by-week visual reference. H = home, A = away, N = neutral.</div>', unsafe_allow_html=True)
-    if source_mode != "Real public schedule data":
-        st.info("Calendar view uses the real public scheduling dataset. Switch the data source above to Real public schedule data.")
+with tab_repair:
+    st.markdown(
+        '<div class="section-kicker">REPAIR A GAME</div>'
+        '<div class="section-title">Move one game. See the minimum repair path.</div>'
+        '<div class="section-copy">This is the core workflow: choose the game and the week you want. If both teams are clear, the answer is one move. If not, the optimizer moves only the additional games required to make it work.</div>',
+        unsafe_allow_html=True,
+    )
+    season_games = [g for g in store.games.values() if int(g.season) == int(season)]
+    teams_with_games = sorted({t for g in season_games for t in (g.home_team, g.away_team)})
+    if not teams_with_games:
+        st.info("No known games are loaded for this season.")
     else:
         c1, c2 = st.columns([1, 2])
         with c1:
-            view_mode = st.radio("View", ["Conference", "Team"], horizontal=True)
-        if view_mode == "Conference":
+            default_team = teams_with_games.index("Georgia") if "Georgia" in teams_with_games else 0
+            repair_team = st.selectbox("School", teams_with_games, index=default_team, key="repair_team")
+        team_games = [g for g in season_games if g.involves(repair_team)]
+        game_map = {f"W{g.week} · {g.away_team} @ {g.home_team}": g for g in sorted(team_games, key=lambda x: (x.week, x.home_team, x.away_team))}
+        with c2:
+            repair_label = st.selectbox("Game", list(game_map.keys()), key="repair_game")
+        selected_game = game_map[repair_label]
+
+        c3, c4 = st.columns([1, 2])
+        with c3:
+            target_week = st.selectbox("Move to week", list(range(14)), index=int(selected_game.week), key="repair_target_week")
+        with c4:
+            st.markdown(
+                f'<div class="decision-card"><div class="decision-icon info">→</div><div>'
+                f'<div class="decision-title">{_html_escape(selected_game.away_team)} @ {_html_escape(selected_game.home_team)}</div>'
+                f'<div class="decision-body">Week {selected_game.week} → <strong>Week {target_week}</strong></div>'
+                f'<div class="decision-detail">Default objective: do exactly this with the fewest additional game changes.</div></div></div>',
+                unsafe_allow_html=True,
+            )
+        with st.expander("Advanced constraints", expanded=False):
+            protect_parity = st.checkbox("Do not create a new FBS conference parity problem", value=False, key="repair_protect_parity")
+            max_secondary = st.slider("Maximum secondary moves", 0, 12, 5, key="repair_max_secondary")
+        if st.button("Find the easiest path", type="primary", use_container_width=True, key="repair_run"):
+            intent = Intent(
+                action="MOVE_GAME", season=int(season), target_week=int(target_week),
+                team_a=selected_game.home_team, team_b=selected_game.away_team,
+                preserve_fbs_conference_parity=bool(protect_parity),
+                max_additional_moves=int(max_secondary),
+                summary=f"Move {selected_game.away_team} @ {selected_game.home_team} to Week {target_week}",
+            )
+            with st.spinner("Checking the direct move, then the smallest repair chain…"):
+                solutions = optimizer.solve(intent)
+            render_ranked_solutions(solutions, 3)
+
+with tab_find:
+    st.markdown(
+        '<div class="section-kicker">FIND A GAME</div>'
+        '<div class="section-title">Match open dates to the right opponent.</div>'
+        '<div class="section-copy">Use this for guarantee games, FBS/FCS needs, or A4 opponents. Public data identifies schedule openings; production Gridiron-style intent data would confirm who is actually buying, selling, or looking.</div>',
+        unsafe_allow_html=True,
+    )
+    all_team_names = sorted(store.teams.keys())
+    f1, f2, f3 = st.columns([1.2, 1.2, 1])
+    with f1:
+        find_team = st.selectbox("School", all_team_names, key="find_team")
+    with f2:
+        find_type = st.selectbox("Need", ["Guarantee / buy game", "A4 opponent"], key="find_type")
+    with f3:
+        week_choice = st.selectbox("Week", ["Any week"] + list(range(14)), key="find_week")
+    find_week = None if week_choice == "Any week" else int(week_choice)
+
+    if st.button("Find best matches", type="primary", use_container_width=True, key="find_run"):
+        if find_type == "Guarantee / buy game":
+            intent = Intent(action="FIND_BUY_GAME", season=int(season), target_week=find_week, team_a=find_team, opponent_class="FCS", summary="Find guarantee game")
+            results = optimizer.solve(intent)
+        else:
+            if find_week is not None:
+                intent = Intent(action="FIND_A4_GAME", season=int(season), target_week=find_week, team_a=find_team, opponent_class="A4", summary="Find A4 opponent")
+                results = optimizer.solve(intent)
+            else:
+                results = []
+                for w in range(14):
+                    results.extend(optimizer.solve(Intent(action="FIND_A4_GAME", season=int(season), target_week=w, team_a=find_team, opponent_class="A4")))
+                results = sorted(results, key=lambda s: (-s.score, s.title))[:20]
+        if not results:
+            _render_move_outcome("conflict", "No current match found", "No compatible opening was found in the loaded data.")
+        else:
+            st.markdown(f'<div class="section-kicker">TOP MATCHES · {len(results)} FOUND</div>', unsafe_allow_html=True)
+            for i, sol in enumerate(results[:10], start=1):
+                st.markdown(
+                    f'<div class="issue-card"><div class="issue-head"><div class="issue-key">#{i} · {_html_escape(sol.title)}</div>'
+                    f'<span class="status-chip good">{int(round(sol.score))}/100</span></div>'
+                    f'<div class="issue-games">{_html_escape(sol.explanation)}</div></div>',
+                    unsafe_allow_html=True,
+                )
+
+with tab_schedules:
+    st.markdown(
+        '<div class="section-kicker">SCHEDULES</div>'
+        '<div class="section-title">See the season. Spot the problem. Fix it.</div>'
+        '<div class="section-copy">The schedule is the visual workspace. Odd/even diagnostics are embedded here instead of living in a separate optimization dashboard.</div>',
+        unsafe_allow_html=True,
+    )
+    if source_mode != "Real public schedule data":
+        st.info("Full logo calendars use the real public schedule dataset. Switch Data source to Real public schedule data.")
+    else:
+        s1, s2 = st.columns([1, 2])
+        with s1:
+            schedule_view = st.radio("View", ["Conference", "Team"], horizontal=True, key="schedule_view")
+        if schedule_view == "Conference":
             conferences = sorted(real_teams_df[(real_teams_df["subdivision"] == "FBS") & (real_teams_df["conference"] != "Unknown")]["conference"].dropna().unique())
             default_conf = conferences.index("SEC") if "SEC" in conferences else 0
-            with c2:
-                conference = st.selectbox("Conference", conferences, index=default_conf)
-            st.markdown(f'<div class="section-kicker">{_html_escape(conference)} · {season}</div>', unsafe_allow_html=True)
-            render_conference_drag_board(store, optimizer, real_teams_df, season, conference)
-            st.markdown('<div class="section-kicker" style="margin-top:1rem">TEAM-BY-WEEK MATRIX</div>', unsafe_allow_html=True)
-            render_conference_calendar(year_games, real_teams_df, season, conference)
+            with s2:
+                schedule_conf = st.selectbox("Conference", conferences, index=default_conf, key="schedule_conf")
+            render_conference_calendar(year_games, real_teams_df, season, schedule_conf)
+
+            # Embedded parity diagnostics: only show weeks that need attention.
+            issues = optimizer.parity_issue_details(store.copy_games(), int(season), range(14), [schedule_conf])
+            if issues:
+                st.markdown('<div class="section-kicker">WEEKS THAT NEED ATTENTION</div>', unsafe_allow_html=True)
+                issue_map = {f"Week {i['week']} · {i['nonconf_count']} non-conf / {i['available']} available": i for i in issues}
+                p1, p2 = st.columns([2, 1])
+                with p1:
+                    selected_issue_label = st.selectbox("Odd week", list(issue_map.keys()), key="schedule_odd_week")
+                issue = issue_map[selected_issue_label]
+                with p2:
+                    st.markdown(
+                        f'<div class="decision-card"><div class="decision-icon conflict">!</div><div>'
+                        f'<div class="decision-title">{schedule_conf} · Week {issue["week"]}</div>'
+                        f'<div class="decision-body">{issue["nonconf_count"]} non-conf · {issue["available"]} available</div>'
+                        f'<div class="decision-detail">Move one conference team into or out of this week.</div></div></div>',
+                        unsafe_allow_html=True,
+                    )
+                if st.button("Show the easiest one-game fix", use_container_width=True, key="schedule_fix_odd"):
+                    solutions = optimizer.solve(Intent(
+                        action="MAKE_CONFERENCE_EVEN", season=int(season), target_week=int(issue["week"]),
+                        conference=schedule_conf, conferences=[schedule_conf], target_weeks=[int(issue["week"])],
+                        preserve_fbs_conference_parity=True, max_additional_moves=4,
+                    ))
+                    render_ranked_solutions(solutions, 3)
+            else:
+                _render_move_outcome("success", "No odd weeks in the loaded snapshot", f"{schedule_conf} is even in every modeled week for {season}.")
         else:
             team_names = sorted(real_teams_df["name"].dropna().unique())
             default_team = team_names.index("Georgia") if "Georgia" in team_names else 0
-            with c2:
-                team = st.selectbox("Team", team_names, index=default_team)
-            render_team_calendar(year_games, real_teams_df, season, team)
-            render_drag_move_lab(store, optimizer, season, team)
+            with s2:
+                schedule_team = st.selectbox("Team", team_names, index=default_team, key="schedule_team")
+            render_team_calendar(year_games, real_teams_df, season, schedule_team)
 
+st.caption("Public-data MVP · Production deployment should replace inferred openings with authoritative schedule, intent, pending-game, contract-flexibility, and guarantee data.")
 
-with tab_opt:
-    st.markdown(
-        '<div class="section-kicker">OPTIMIZATION CENTER</div>'
-        '<div class="section-title">Turn every scheduling report into a solution</div>'
-        '<div class="section-copy">One CP-SAT engine powers the report scenarios below. It minimizes game movement, protects healthy conference/week parity, and applies the selected report objective as a mathematical optimization problem.</div>',
-        unsafe_allow_html=True,
-    )
-    engine_label = optimizer.engine_name
-    engine_state = "READY" if ORTOOLS_AVAILABLE else "FALLBACK"
-    st.markdown(
-        f'<div class="metric-strip">'
-        f'<div class="metric-card"><div class="metric-label">ENGINE</div><div class="metric-value">{_html_escape(engine_label)}</div><div class="metric-sub">Advanced constraint programming</div></div>'
-        f'<div class="metric-card"><div class="metric-label">STATUS</div><div class="metric-value">{engine_state}</div><div class="metric-sub">Interactive solve target: ≤ {optimizer.time_limit_seconds:.0f}s</div></div>'
-        f'<div class="metric-card"><div class="metric-label">OBJECTIVE</div><div class="metric-value">MINIMUM DISRUPTION</div><div class="metric-sub">Parity → moves → date distance</div></div>'
-        f'<div class="metric-card"><div class="metric-label">SEASON</div><div class="metric-value">{season}</div><div class="metric-sub">Active optimization workspace</div></div>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
-    if not ORTOOLS_AVAILABLE:
-        _render_move_outcome("conflict", "Advanced solver unavailable", "OR-Tools is not installed in this runtime.", "Commit the updated requirements.txt and Streamlit will install CP-SAT automatically.")
-
-    report = st.selectbox(
-        "Scheduling report / scenario",
-        [
-            "Odd / Even",
-            "Scheduled Games / Move Repair",
-            "# of Controlled Games",
-            "# of FCS Games / Week",
-            "Market Report",
-            "Teams Needing Games",
-            "Pending Games",
-            "Bye Report",
-            "Optimize National Schedule",
-        ],
-        key="optimization_report",
-    )
-
-    def _run_and_render(intent: Intent, button_key: str, label: str = "Run optimization"):
-        if st.button(label, key=button_key, type="primary", use_container_width=True):
-            started = time.perf_counter()
-            with st.spinner("Solving the feasible scheduling graph…"):
-                sols = optimizer.solve(intent)
-            elapsed = time.perf_counter() - started
-            st.caption(f"{optimizer.engine_name} · {optimizer.last_solver_status} · {elapsed:.2f}s")
-            if not sols:
-                _render_move_outcome("conflict", "No feasible solution", "The current constraints do not permit a valid schedule change.", "Try a different target week or connect authoritative intent/flexibility data for a richer feasible graph.")
-            else:
-                for i, sol in enumerate(sols, 1):
-                    render_solution(sol, i)
-
-    conferences = optimizer.store.fbs_conferences()
-    default_sec = conferences.index("SEC") if "SEC" in conferences else 0
-
-    if report == "Odd / Even":
-        st.markdown('<div class="section-kicker">ODD / EVEN</div><div class="section-title">Fix the week with one move.</div><div class="section-copy">Start with the simplest answer: move one non-conference game into or out of the selected week. The network optimizer is only used if a clean one-game solution does not exist.</div>', unsafe_allow_html=True)
-        a, b = st.columns(2)
-        with a:
-            conf = st.selectbox("Conference", conferences, index=default_sec, key="opt_parity_conf")
-        with b:
-            week = st.selectbox("Week", list(range(0, 14)), index=2, key="opt_parity_week")
-
-        feedback = st.session_state.pop(f"simple_parity_feedback_{season}", None)
-        if feedback:
-            _render_move_outcome("success", "Move applied to what-if workspace", feedback, "The calendar and parity counts below now reflect the proposed move.")
-
-        base_games = store.copy_games()
-        state = _conference_nonconf_state(store, base_games, season, conf, int(week))
-        nc = int(state["nonconf_count"])
-        available = int(state["available"])
-        conf_size = int(state["conference_size"])
-
-        if state["is_even"]:
-            _render_move_outcome(
-                "success",
-                f"{conf} · Week {week} is already even",
-                f"{nc} teams are in non-conference games; {available} teams are available for conference play.",
-                "No schedule move is required.",
-            )
-        else:
-            add_nc = nc + 1
-            add_avail = max(0, conf_size - add_nc)
-            remove_nc = max(0, nc - 1)
-            remove_avail = conf_size - remove_nc
-            st.markdown(
-                '<div class="decision-card decision-info" style="margin-top:12px">'
-                '<div class="decision-icon">↔</div><div>'
-                f'<div class="decision-title">{_html_escape(conf)} · Week {week}: {nc} non-conference / {available} available</div>'
-                f'<div class="decision-body">You only need to change one conference team appearance. Either <strong>add one</strong> to reach {add_nc} non-conference / {add_avail} available, or <strong>remove one</strong> to reach {remove_nc} non-conference / {remove_avail} available.</div>'
-                '<div class="decision-detail">Single-game solutions are ranked first. No unrelated national schedule changes are made.</div>'
-                '</div></div>',
-                unsafe_allow_html=True,
-            )
-
-            candidates = _simple_parity_candidates(store, optimizer, season, conf, int(week))
-            add_clean = [x for x in candidates["add"] if x["clean"]]
-            remove_clean = [x for x in candidates["remove"] if x["clean"]]
-            add_show = add_clean[:3] if add_clean else candidates["add"][:3]
-            remove_show = remove_clean[:3] if remove_clean else candidates["remove"][:3]
-
-            left, right = st.columns(2, gap="large")
-            with left:
-                st.markdown(f'<div class="section-kicker">PATH A</div><div class="section-title" style="font-size:1rem">Add 1 non-conference team</div><div class="section-copy">Target: <strong>{add_nc} non-conference / {add_avail} available</strong>. Move one {conf} non-conference game from another week into Week {week}.</div>', unsafe_allow_html=True)
-                if add_show:
-                    for idx, candidate in enumerate(add_show, 1):
-                        _render_simple_parity_option(candidate, season, f"add_parity_{conf}_{week}", idx)
-                else:
-                    _render_move_outcome("conflict", "No one-game add option", "No known game can move directly into this week with both teams free.", "Use the advanced repair path below only if you need this side of the solution.")
-
-            with right:
-                st.markdown(f'<div class="section-kicker">PATH B</div><div class="section-title" style="font-size:1rem">Remove 1 non-conference team</div><div class="section-copy">Target: <strong>{remove_nc} non-conference / {remove_avail} available</strong>. Move one current Week {week} non-conference game to another mutually open week.</div>', unsafe_allow_html=True)
-                if remove_show:
-                    for idx, candidate in enumerate(remove_show, 1):
-                        _render_simple_parity_option(candidate, season, f"remove_parity_{conf}_{week}", idx)
-                else:
-                    _render_move_outcome("conflict", "No one-game remove option", "No current non-conference game has a clean mutually open destination in the known schedule.", "Use the advanced repair path below only if necessary.")
-
-            if not add_clean and not remove_clean:
-                with st.expander("No clean one-game option? Find the smallest repair path"):
-                    st.caption("This is the only point where CP-SAT is allowed to move more than one game. It will minimize the number of changes first.")
-                    _run_and_render(
-                        Intent(action="MAKE_CONFERENCE_EVEN", season=season, target_week=week, conference=conf, max_additional_moves=2, summary="Escalated odd/even repair after no clean single-game option"),
-                        "run_parity_advanced",
-                        "Find smallest repair path",
-                    )
-
-    elif report == "Scheduled Games / Move Repair":
-        st.markdown('<div class="section-kicker">SCHEDULED GAMES</div><div class="section-copy">Choose a known non-conference game and force it into a new week. The optimizer first attempts the requested move only. It relocates other games only when they are directly displaced or when you explicitly ask to preserve conference parity.</div>', unsafe_allow_html=True)
-        season_games = sorted([g for g in store.games.values() if g.season == season], key=lambda g: (g.week, g.home_team, g.away_team))
-        if not season_games:
-            st.info("No dated games are loaded for this season.")
-        else:
-            labels = {f"W{g.week} · {g.away_team} @ {g.home_team}": g for g in season_games}
-            game_label = st.selectbox("Game", list(labels), key="opt_move_game")
-            target_week = st.selectbox("Move to week", list(range(0, 14)), index=min(13, labels[game_label].week + 1), key="opt_move_week")
-            g = labels[game_label]
-            _run_and_render(Intent(action="MOVE_GAME", season=season, target_week=target_week, team_a=g.home_team, team_b=g.away_team, preserve_fbs_conference_parity=False, max_additional_moves=6, summary="Optimization Center scheduled-game repair"), "run_move")
-
-    elif report == "# of Controlled Games":
-        st.markdown('<div class="section-kicker">CONTROLLED GAME DISTRIBUTION</div><div class="section-copy">Balance a conference’s weekly non-conference inventory while preserving currently healthy FBS parity. In the public-data prototype this uses known non-conference team appearances as the controlled-inventory proxy.</div>', unsafe_allow_html=True)
-        conf = st.selectbox("Conference", conferences, index=default_sec, key="opt_control_conf")
-        _run_and_render(Intent(action="BALANCE_CONTROLLED_GAMES", season=season, conference=conf, preserve_fbs_conference_parity=True, max_additional_moves=12, summary="Balance controlled games"), "run_controlled", "Optimize weekly inventory")
-
-    elif report == "# of FCS Games / Week":
-        st.markdown('<div class="section-kicker">FCS GAMES / WEEK</div><div class="section-copy">Redistribute known FBS–FCS games toward a more even weekly cadence while minimizing moves and keeping FBS conferences schedulable.</div>', unsafe_allow_html=True)
-        _run_and_render(Intent(action="BALANCE_FCS_GAMES", season=season, preserve_fbs_conference_parity=True, max_additional_moves=18, summary="Balance FCS games by week"), "run_fcs_balance", "Optimize FCS distribution")
-
-    elif report == "Optimize National Schedule":
-        st.markdown('<div class="section-kicker">NATIONAL OPTIMIZATION</div><div class="section-copy">Solve the season as one network. The objective first minimizes FBS conference/week parity failures, then minimizes games moved and distance from current dates.</div>', unsafe_allow_html=True)
-        _run_and_render(Intent(action="OPTIMIZE_NATIONAL", season=season, preserve_fbs_conference_parity=False, max_additional_moves=30, summary="Optimize national non-conference schedule"), "run_national", f"Optimize {season}")
-
-    elif report == "Market Report":
-        st.markdown('<div class="section-kicker">MARKET REPORT</div><div class="section-copy">Production mode maximizes fulfilled explicit buy/sell/A4 needs subject to mutual date availability. This requires the authoritative needs table; public schedule pages only show commitments, not school intent.</div>', unsafe_allow_html=True)
-        if store.needs:
-            st.dataframe(pd.DataFrame([n.__dict__ for n in store.needs if n.season == season]), use_container_width=True, hide_index=True)
-            _run_and_render(Intent(action="OPTIMIZE_MARKET", season=season, preserve_fbs_conference_parity=True, summary="Optimize market report"), "run_market", "Optimize market matches")
-        else:
-            st.info("The solver path is built, but the public-data mode has no true ‘looking to buy/sell’ flags. Once connected to the authoritative scheduling data, these report rows become explicit optimization demand.")
-
-    elif report == "Teams Needing Games":
-        st.markdown('<div class="section-kicker">TEAMS NEEDING GAMES</div><div class="section-copy">This scenario needs authoritative NEED_FBS / NEED_FCS / NEED_A4 inventory. Public blank dates cannot safely be treated as a school asking for a game.</div>', unsafe_allow_html=True)
-        if store.needs:
-            st.dataframe(pd.DataFrame([n.__dict__ for n in store.needs if n.season == season]), use_container_width=True, hide_index=True)
-        else:
-            st.info("Data adapter ready: connect the Teams Needing Games report or underlying needs table to activate national maximum matching.")
-
-    elif report == "Pending Games":
-        st.markdown('<div class="section-kicker">PENDING GAMES</div><div class="section-copy">Pending games should become soft reservations in the production model: protected more strongly than an open slot but still movable if a higher-value national solution requires it.</div>', unsafe_allow_html=True)
-        st.info("Public FBSchedules data does not expose authoritative pending-game status. The production data adapter should map pending rows into weighted soft constraints.")
-
-    elif report == "Bye Report":
-        st.markdown('<div class="section-kicker">BYE REPORT</div><div class="section-copy">A true bye optimizer requires the complete conference + non-conference schedule. A blank non-conference week is not necessarily a bye because a conference game may occupy it.</div>', unsafe_allow_html=True)
-        st.info("The CP-SAT model is ready to accept blocked/bye/conference-game weeks from the authoritative scheduling system. Public non-conference data alone is intentionally not treated as authoritative bye data.")
-
-with tab_health:
-    st.markdown('<div class="section-kicker">CONFERENCE HEALTH</div><div class="section-title">Weekly FBS scheduling parity</div><div class="section-copy">After removing teams with known dated non-conference games, is each conference left with an even number of teams available for conference play?</div>', unsafe_allow_html=True)
-    df = parity_table(season)
-    if len(df):
-        pivot = df.pivot(index="Conference", columns="Week", values="Status")
-        st.dataframe(pivot, use_container_width=True)
-        odd_rows = df[df["Status"] == "ODD"]
-        if len(odd_rows):
-            st.markdown('<div class="section-kicker">ODD-WEEK FLAGS</div>', unsafe_allow_html=True)
-            st.dataframe(odd_rows[["Conference", "Week", "Detail"]], use_container_width=True, hide_index=True)
-
-with tab_schedule:
-    st.markdown('<div class="section-kicker">SCHEDULE DATA</div><div class="section-title">Known non-conference commitments</div>', unsafe_allow_html=True)
-    if source_mode == "Real public schedule data":
-        display_cols = ["date", "week", "away_team", "home_team", "neutral", "matchup_type", "away_conference", "home_conference"]
-        year_df = year_games.copy()
-        st.dataframe(year_df[[c for c in display_cols if c in year_df.columns]], use_container_width=True, hide_index=True, height=520)
-        csv_bytes = year_df.to_csv(index=False).encode("utf-8")
-        st.download_button(f"Download {season} CSV", csv_bytes, f"cfb_nonc_optimizer_{season}_public_snapshot.csv", "text/csv", use_container_width=False)
-        if scrape_errors:
-            with st.expander(f"Data warnings ({len(scrape_errors)})"):
-                st.code("\n".join(scrape_errors[:100]))
-    else:
-        games_df = pd.DataFrame([g.__dict__ for g in store.games.values()])
-        st.dataframe(games_df.sort_values(["season", "week", "home_team"]), use_container_width=True, hide_index=True)
-
-with tab_needs:
-    st.markdown('<div class="section-kicker">OPEN MARKET</div><div class="section-title">Potential scheduling inventory</div><div class="section-copy">Public data can identify teams with no known dated non-conference commitment. Production scheduling data would distinguish truly open, flexible, buy-game, A4, and blocked inventory.</div>', unsafe_allow_html=True)
-    if source_mode == "Real public schedule data":
-        candidate_week = st.select_slider("Week", options=list(range(0, 14)), value=2)
-        base_games = store.copy_games()
-        rows = []
-        for team in store.teams.values():
-            occupied = store.game_for_team_week(base_games, team.name, season, candidate_week) is not None
-            if not occupied:
-                rows.append({"Team": team.name, "Subdivision": team.subdivision, "Conference": team.conference, "A4": team.is_a4})
-        cand = pd.DataFrame(rows).sort_values(["Subdivision", "Conference", "Team"])
-        k1, k2, k3 = st.columns(3)
-        with k1: subdivision_filter = st.selectbox("Level", ["All", "FBS", "FCS"])
-        with k2: conf_opts = ["All"] + sorted(cand["Conference"].dropna().unique().tolist())
-        with k2: conference_filter = st.selectbox("Conference filter", conf_opts)
-        with k3: a4_only = st.checkbox("A4 only")
-        if subdivision_filter != "All": cand = cand[cand["Subdivision"] == subdivision_filter]
-        if conference_filter != "All": cand = cand[cand["Conference"] == conference_filter]
-        if a4_only: cand = cand[cand["A4"] == True]
-        st.dataframe(cand, use_container_width=True, hide_index=True, height=520)
-    else:
-        needs_df = pd.DataFrame([n.__dict__ for n in store.needs])
-        if len(needs_df):
-            st.dataframe(needs_df[needs_df["season"] == season], use_container_width=True, hide_index=True)
-        else:
-            st.info("No needs loaded.")
