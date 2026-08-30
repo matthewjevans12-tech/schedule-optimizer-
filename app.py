@@ -2301,22 +2301,20 @@ def render_conference_drag_board(
         containers.append({"header": f"W{week} · {sat}", "items": items})
 
     css = [
-        ".sortable-component{display:grid!important;grid-template-columns:repeat(7,minmax(138px,1fr));gap:8px;background:transparent!important;padding:2px!important}",
-        ".sortable-container{min-height:126px!important;background:#0a1624!important;border:1px solid #263a53!important;border-radius:12px!important;overflow:hidden!important;transition:border-color .15s ease,background .15s ease,box-shadow .15s ease!important}",
-        ".sortable-container-header{font-size:10px!important;font-weight:850!important;color:#9aabc0!important;background:#0f1e30!important;padding:9px 9px!important;border-bottom:1px solid #263a53!important}",
-        ".sortable-container-body{min-height:84px!important;padding:7px!important}",
-        ".sortable-item{font-size:10px!important;line-height:1.25!important;background:linear-gradient(180deg,#19304a,#13263b)!important;color:#f4f7fb!important;border:1px solid #476887!important;border-radius:9px!important;padding:9px!important;cursor:grab!important;box-shadow:0 4px 14px rgba(0,0,0,.16)!important;font-weight:760!important;margin-bottom:6px!important;touch-action:none!important;user-select:none!important;-webkit-user-select:none!important}",
-        ".sortable-item:active{cursor:grabbing!important;transform:scale(1.015)!important}",
-        ".sortable-ghost{opacity:.42!important;border-color:#70a6ff!important;background:#18345a!important}",
-        ".sortable-chosen{border-color:#78adff!important;box-shadow:0 0 0 2px rgba(79,140,255,.18)!important}",
-        ".sortable-container:has(.sortable-ghost){border-color:#4f8cff!important;background:#10243c!important;box-shadow:inset 0 0 0 1px rgba(79,140,255,.18)!important}",
+        ".sortable-component.vertical{display:flex!important;flex-wrap:wrap!important;align-items:stretch!important;gap:8px!important;background:transparent!important;padding:2px!important}",
+        ".sortable-component.vertical .sortable-container{box-sizing:border-box!important;flex:1 1 150px!important;min-width:145px!important;max-width:190px!important;margin:0!important;padding:0!important;min-height:122px!important;background:#0a1624!important;border:1px solid #263a53!important;border-radius:12px!important;overflow:hidden!important}",
+        ".sortable-container-header{font-size:10px!important;font-weight:850!important;color:#9aabc0!important;background:#0f1e30!important;padding:9px!important;border-bottom:1px solid #263a53!important}",
+        ".sortable-container-body{box-sizing:border-box!important;min-height:82px!important;padding:7px!important}",
+        ".sortable-item,.sortable-item:hover{box-sizing:border-box!important;font-size:10px!important;line-height:1.25!important;background:#19304a!important;color:#f4f7fb!important;border:1px solid #476887!important;border-radius:9px!important;padding:9px!important;cursor:grab!important;box-shadow:none!important;font-weight:760!important;margin:0 0 6px 0!important;touch-action:none!important;user-select:none!important;-webkit-user-select:none!important}",
+        ".sortable-item:active{cursor:grabbing!important}",
+        ".active{opacity:.45!important}",
     ]
 
     nonce = st.session_state.get(f"conference_board_nonce_{season}_{conference}", 0)
     sorted_containers = sort_items(
         containers,
         multi_containers=True,
-        direction="horizontal",
+        direction="vertical",
         custom_style="\n".join(css),
         key=f"conference_schedule_{season}_{conference}_{nonce}",
     )
@@ -2441,20 +2439,20 @@ def render_drag_move_lab(
         containers.append({"header": f"W{week} · {sat}", "items": items})
 
     css = [
-        ".sortable-component{display:grid!important;grid-template-columns:repeat(7,minmax(122px,1fr));gap:8px;background:transparent!important;padding:2px!important}",
-        ".sortable-container{min-height:108px!important;background:#0b1726!important;border:1px solid #25344a!important;border-radius:12px!important;overflow:hidden!important;transition:border-color .15s ease,background .15s ease!important}",
+        ".sortable-component.vertical{display:flex!important;flex-wrap:wrap!important;align-items:stretch!important;gap:8px!important;background:transparent!important;padding:2px!important}",
+        ".sortable-component.vertical .sortable-container{box-sizing:border-box!important;flex:1 1 138px!important;min-width:132px!important;max-width:175px!important;margin:0!important;padding:0!important;min-height:106px!important;background:#0b1726!important;border:1px solid #25344a!important;border-radius:12px!important;overflow:hidden!important}",
         ".sortable-container-header{font-size:10px!important;font-weight:850!important;letter-spacing:.02em!important;color:#91a0b4!important;background:#0f1d2d!important;padding:9px 8px!important;border-bottom:1px solid #24334a!important}",
-        ".sortable-container-body{min-height:64px!important;padding:7px!important}",
-        ".sortable-item{font-size:10px!important;line-height:1.25!important;background:linear-gradient(180deg,#1a2b42,#142338)!important;color:#eef3f8!important;border:1px solid #44617f!important;border-radius:9px!important;padding:10px 9px!important;cursor:grab!important;box-shadow:0 4px 12px rgba(0,0,0,.13)!important;font-weight:760!important}",
-        ".sortable-item:active{cursor:grabbing!important;transform:scale(1.02)!important}",
-        ".sortable-container:has(.sortable-item){border-color:#416a9a!important;background:#0e1c2c!important}",
+        ".sortable-container-body{box-sizing:border-box!important;min-height:62px!important;padding:7px!important}",
+        ".sortable-item,.sortable-item:hover{box-sizing:border-box!important;font-size:10px!important;line-height:1.25!important;background:#1a2b42!important;color:#eef3f8!important;border:1px solid #44617f!important;border-radius:9px!important;padding:10px 9px!important;cursor:grab!important;box-shadow:none!important;font-weight:760!important;margin:0!important;touch-action:none!important;user-select:none!important;-webkit-user-select:none!important}",
+        ".sortable-item:active{cursor:grabbing!important}",
+        ".active{opacity:.45!important}",
     ]
 
     nonce = st.session_state.get(f"move_board_nonce_{season}_{selected_team}", 0)
     sorted_containers = sort_items(
         containers,
         multi_containers=True,
-        direction="horizontal",
+        direction="vertical",
         custom_style="\n".join(css),
         key=f"direct_schedule_{season}_{selected_team}_{nonce}",
     )
