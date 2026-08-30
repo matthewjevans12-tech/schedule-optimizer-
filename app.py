@@ -111,6 +111,11 @@ class Intent:
     season: Optional[int] = None
     target_week: Optional[int] = None
     conference: Optional[str] = None
+    # Multi-scope fields let the LLM express requests such as
+    # "fix every conference in Weeks 1, 2 and 3" without losing information.
+    target_weeks: List[int] = field(default_factory=list)
+    conferences: List[str] = field(default_factory=list)
+    all_conferences: bool = False
     team_a: Optional[str] = None
     team_b: Optional[str] = None
     preserve_fbs_conference_parity: bool = True
@@ -723,6 +728,38 @@ class AdvancedNonConferenceOptimizer(NonConferenceOptimizer):
                 result[(conf, week)] = value.startswith("ODD")
         return result
 
+    def _intent_scope(self, intent: Intent) -> Tuple[List[str], List[int]]:
+        """Return the conference/week scope the user explicitly asked to optimize.
+
+        Empty scope means the full national season. Singular legacy fields are
+        folded into the list fields so old UI controls keep working.
+        """
+        if intent.all_conferences:
+            conferences = self.store.fbs_conferences()
+        elif intent.conferences:
+            valid = set(self.store.fbs_conferences())
+            conferences = [c for c in intent.conferences if c in valid]
+        elif intent.conference:
+            conferences = [intent.conference]
+        else:
+            conferences = self.store.fbs_conferences()
+
+        weeks = [int(w) for w in intent.target_weeks if 0 <= int(w) <= 13]
+        if not weeks and intent.target_week is not None and 0 <= int(intent.target_week) <= 13:
+            weeks = [int(intent.target_week)]
+        if not weeks:
+            weeks = list(range(0, 14))
+        return sorted(set(conferences)), sorted(set(weeks))
+
+    def _scoped_bad_count(self, games: Dict[str, Game], season: int, conferences: List[str], weeks: List[int]) -> int:
+        count = 0
+        for week in weeks:
+            parity = self.conference_parity(games, season, week)
+            for conf in conferences:
+                if parity.get(conf, "").startswith("ODD"):
+                    count += 1
+        return count
+
     def _game_conference_coeff(self, game: Game, conference: str) -> int:
         members = {t.name for t in self.store.conference_members(conference)}
         if not members:
@@ -797,6 +834,8 @@ class AdvancedNonConferenceOptimizer(NonConferenceOptimizer):
             model.Add(x[(target_game.game_id, tw)] == 1)
 
         base_bad = self._base_bad_parity(season)
+        scope_conferences, scope_weeks = self._intent_scope(intent)
+        scope_keys = {(c, w) for c in scope_conferences for w in scope_weeks}
         parity_bad: Dict[Tuple[str, int], object] = {}
         for conf in self.store.fbs_conferences():
             members = self.store.conference_members(conf)
@@ -859,6 +898,11 @@ class AdvancedNonConferenceOptimizer(NonConferenceOptimizer):
             model.Add(sum(changed_vars) <= 30)
 
         objective_terms = []
+        # National/multi-week requests heavily prioritize the exact scope the
+        # administrator named, while still discouraging parity problems elsewhere.
+        scoped_bad_vars = [v for k, v in parity_bad.items() if k in scope_keys]
+        if mode == "national" and scoped_bad_vars:
+            objective_terms.append((self.PARITY_PENALTY * 5) * sum(scoped_bad_vars))
         objective_terms.append(self.PARITY_PENALTY * sum(parity_bad.values()))
         objective_terms.append(self.MOVE_PENALTY * sum(changed_vars))
         objective_terms.append(self.DISTANCE_PENALTY * sum(distance_terms))
@@ -920,7 +964,10 @@ class AdvancedNonConferenceOptimizer(NonConferenceOptimizer):
 
         before_bad_count = sum(1 for v in base_bad.values() if v)
         after_bad_count = self.parity_violation_count(after_games, season, range(0, 14))
-        touched = sorted(({m.from_week for m in moves} | {m.to_week for m in moves} | ({int(intent.target_week)} if intent.target_week is not None else set())))
+        scope_before_bad = self._scoped_bad_count(self.store.copy_games(), season, scope_conferences, scope_weeks)
+        scope_after_bad = self._scoped_bad_count(after_games, season, scope_conferences, scope_weeks)
+        explicit_weeks = set(scope_weeks if (intent.target_weeks or intent.target_week is not None) else [])
+        touched = sorted(({m.from_week for m in moves} | {m.to_week for m in moves} | explicit_weeks))
         parity_before: Dict[str, str] = {}
         parity_after: Dict[str, str] = {}
         for week in touched:
@@ -943,11 +990,25 @@ class AdvancedNonConferenceOptimizer(NonConferenceOptimizer):
             warnings.append(f"{after_bad_count} FBS conference/week parity issue(s) remain nationally after this optimization.")
         if status == cp_model.FEASIBLE:
             warnings.append("The solver found a high-quality feasible solution within the time limit; it did not prove global optimality.")
+        if mode == "national":
+            conf_scope = "all FBS conferences" if intent.all_conferences or (not intent.conference and not intent.conferences) else ", ".join(scope_conferences)
+            week_scope = ", ".join(f"W{w}" for w in scope_weeks)
+            scope_sentence = (
+                f"Within the requested scope ({conf_scope}; {week_scope}), odd conference/week slots changed "
+                f"from {scope_before_bad} to {scope_after_bad}. "
+            )
+        else:
+            scope_sentence = ""
         explanation = (
             f"{mode_label} with {self.engine_name}. The solver evaluated the feasible game/week graph, "
             f"moved {len(moves)} game(s), and changed national parity issues from {before_bad_count} to {after_bad_count}. "
-            f"Solver status: {self.last_solver_status} in {self.last_solver_seconds:.2f}s."
+            f"{scope_sentence}Solver status: {self.last_solver_status} in {self.last_solver_seconds:.2f}s."
         )
+        if mode == "national" and scope_after_bad > 0:
+            warnings.append(
+                f"{scope_after_bad} requested conference/week parity issue(s) remain. This is the best solution found "
+                f"within the current move limits and public-data assumptions."
+            )
         return [Solution(
             title="Recommended optimization",
             moves=sorted(moves, key=lambda m: (m.from_week, m.home_team, m.away_team)),
@@ -1098,6 +1159,9 @@ INTENT_SCHEMA = {
         "season": {"type": ["integer", "null"]},
         "target_week": {"type": ["integer", "null"]},
         "conference": {"type": ["string", "null"]},
+        "target_weeks": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 13}, "maxItems": 14},
+        "conferences": {"type": "array", "items": {"type": "string"}, "maxItems": 20},
+        "all_conferences": {"type": "boolean"},
         "team_a": {"type": ["string", "null"]},
         "team_b": {"type": ["string", "null"]},
         "preserve_fbs_conference_parity": {"type": "boolean"},
@@ -1107,7 +1171,7 @@ INTENT_SCHEMA = {
         "max_guarantee": {"type": ["integer", "null"]},
         "summary": {"type": "string"}
     },
-    "required": ["action", "season", "target_week", "conference", "team_a", "team_b", "preserve_fbs_conference_parity", "max_additional_moves", "opponent_class", "location", "max_guarantee", "summary"],
+    "required": ["action", "season", "target_week", "conference", "target_weeks", "conferences", "all_conferences", "team_a", "team_b", "preserve_fbs_conference_parity", "max_additional_moves", "opponent_class", "location", "max_guarantee", "summary"],
     "additionalProperties": False
 }
 
@@ -1120,10 +1184,13 @@ Definitions:
 - FIND_BUY_GAME: a school is looking for a buy/guarantee game. For an FBS requester, look for FCS candidates. For an FCS requester, look for potential FBS guarantee-game hosts. target_week may be null when the user asks for options across an entire season.
 - FIND_A4_GAME: an A4 school needs an A4 nonconference opponent.
 - OPTIMIZE_NATIONAL: user asks to optimize a whole season or solve the biggest national scheduling problems.
+  Also use OPTIMIZE_NATIONAL when the user asks to solve parity across multiple conferences or multiple weeks, e.g. "solve all conferences' odd problems in Weeks 1, 2 and 3."
 - BALANCE_FCS_GAMES: user wants to improve or balance the number of FBS-vs-FCS games by week.
 - BALANCE_CONTROLLED_GAMES: user wants to balance a conference's weekly non-conference/controlled-game inventory.
 - OPTIMIZE_MARKET: user asks to optimize or match the overall market / teams-needing-games report.
 For a request like 'The SEC is odd in week 2 and I need to move Georgia vs McNeese to week 2 ...', use MOVE_GAME, conference SEC, team_a Georgia, team_b McNeese, target_week 2, and preserve parity true.
+For every explicitly named week, populate target_weeks. If exactly one week is named, also populate target_week; if multiple weeks are named, target_week should be null.
+For every explicitly named conference, populate conferences. If exactly one conference is named, also populate conference. If the user says all/every conferences, set all_conferences true, conferences empty, conference null.
 If the year is omitted, season should be null rather than guessed. Never invent teams, dates, guarantee amounts, or constraints.
 """
 
@@ -1159,6 +1226,12 @@ def parse_with_openai(text: str, team_names: Iterable[str]) -> Intent:
     data = json.loads(response.output_text)
     data["team_a"] = _normalize_team(data.get("team_a"), team_names)
     data["team_b"] = _normalize_team(data.get("team_b"), team_names)
+    data["target_weeks"] = sorted(set(int(w) for w in (data.get("target_weeks") or []) if 0 <= int(w) <= 13))
+    if len(data["target_weeks"]) == 1 and data.get("target_week") is None:
+        data["target_week"] = data["target_weeks"][0]
+    data["conferences"] = list(dict.fromkeys(data.get("conferences") or []))
+    if len(data["conferences"]) == 1 and data.get("conference") is None:
+        data["conference"] = data["conferences"][0]
     return Intent(**data)
 
 
@@ -1166,15 +1239,21 @@ def parse_locally(text: str, team_names: Iterable[str]) -> Intent:
     """Small offline parser so the demo still works without an API key."""
     lower = text.lower()
     year_match = re.search(r"\b(20\d{2})\b", text)
-    week_match = re.search(r"\bweek\s*(\d{1,2})\b", lower)
     season = int(year_match.group(1)) if year_match else None
-    week = int(week_match.group(1)) if week_match else None
 
-    conference = None
-    for conf in ["SEC", "ACC", "Big Ten", "Big 12", "AAC", "Mountain West", "Sun Belt", "Conference USA", "MAC", "Pac-12"]:
-        if conf.lower() in lower:
-            conference = conf
-            break
+    # Capture both singular and list forms: "Week 2" and "Weeks 1, 2 and 3".
+    target_weeks: List[int] = []
+    plural = re.search(r"\bweeks?\s+((?:\d{1,2}\s*(?:(?:,|and|&)\s*)?)+)", lower)
+    if plural:
+        target_weeks.extend(int(v) for v in re.findall(r"\d{1,2}", plural.group(1)))
+    target_weeks.extend(int(m.group(1)) for m in re.finditer(r"\bweek\s*(\d{1,2})\b", lower))
+    target_weeks = sorted(set(w for w in target_weeks if 0 <= w <= 13))
+    week = target_weeks[0] if len(target_weeks) == 1 else None
+
+    known_confs = ["SEC", "ACC", "Big Ten", "Big 12", "AAC", "Mountain West", "Sun Belt", "Conference USA", "MAC", "Pac-12"]
+    conferences = [conf for conf in known_confs if conf.lower() in lower]
+    all_conferences = bool(re.search(r"\b(?:all|every)\s+(?:fbs\s+)?conferences?\b|\bnational\s+parity\b", lower))
+    conference = conferences[0] if len(conferences) == 1 else None
 
     found = []
     for name in sorted(team_names, key=len, reverse=True):
@@ -1196,7 +1275,15 @@ def parse_locally(text: str, team_names: Iterable[str]) -> Intent:
             guarantee = int(value)
 
     buy_request = bool(re.search(r"\bbuy(?:\s+(?:a|an))?\s+game\b|\bbuy-game\b|\bguarantee(?:\s+game)?\b", lower))
-    if ("optimize" in lower or "solve the season" in lower) and not found and not conference:
+    multi_parity_request = (
+        (all_conferences or len(target_weeks) > 1 or len(conferences) > 1)
+        and bool(re.search(r"\b(?:odd|even|parity|solve|fix|optimi[sz]e)\b", lower))
+    )
+    if multi_parity_request:
+        action = "OPTIMIZE_NATIONAL"
+        team_a, team_b = None, None
+        opponent_class = "ANY"
+    elif ("optimize" in lower or "solve the season" in lower) and not found and not conference:
         action = "OPTIMIZE_NATIONAL"
         team_a, team_b = None, None
         opponent_class = "ANY"
@@ -1234,6 +1321,9 @@ def parse_locally(text: str, team_names: Iterable[str]) -> Intent:
         season=season,
         target_week=week,
         conference=conference,
+        target_weeks=target_weeks,
+        conferences=conferences,
+        all_conferences=all_conferences,
         team_a=team_a,
         team_b=team_b,
         preserve_fbs_conference_parity=True,
@@ -2193,7 +2283,16 @@ with tab_chat:
             elapsed = time.perf_counter() - started
             parser_label = "AI intent" if "openai" in parser_name.lower() else "Local intent"
             st.caption(f"{parser_label} · Optimizer {elapsed:.2f}s")
-            with st.expander("How Gridiron interpreted your request"):
+            if intent.action == "OPTIMIZE_NATIONAL" and (intent.target_weeks or intent.all_conferences or intent.conferences):
+                scope_bits = []
+                if intent.all_conferences:
+                    scope_bits.append("All FBS conferences")
+                elif intent.conferences:
+                    scope_bits.append(", ".join(intent.conferences))
+                if intent.target_weeks:
+                    scope_bits.append("Weeks " + ", ".join(str(w) for w in intent.target_weeks))
+                st.info("Optimization scope: " + " · ".join(scope_bits))
+            with st.expander("How Gridiron interpreted your request", expanded=False):
                 st.json(intent.__dict__)
             if not solutions:
                 st.error("No feasible result was found in the current dataset. Public data does not yet include true school intent, contract flexibility, or guarantee requirements.")
