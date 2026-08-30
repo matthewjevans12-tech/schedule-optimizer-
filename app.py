@@ -2450,7 +2450,74 @@ def render_conference_drag_board(
     )
 
     if not SORTABLES_AVAILABLE:
-        st.info("Direct drag-and-drop requires streamlit-sortables. Your deployment requirements include it; if this message appears, redeploy requirements.txt.")
+        games = []
+        for g in store.games.values():
+            if int(g.season) != int(season):
+                continue
+            if g.home_team in members or g.away_team in members:
+                games.append(g)
+        games.sort(key=lambda g: (int(g.week), g.home_team, g.away_team))
+        if not games:
+            st.info("No dated non-conference games are loaded for this conference.")
+            return
+
+        st.markdown(
+            '<div class="section-copy" style="margin:.2rem 0 .8rem 0">'
+            'Stable move controls are active for this cloud build. Select the game and destination week; '
+            'the same optimizer will accept a clean move or return the minimum-change repair path.'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        option_map = {
+            f"W{int(g.week)} · {g.away_team} @ {g.home_team}": g
+            for g in games
+        }
+        chosen_label = st.selectbox(
+            "Game to move",
+            list(option_map.keys()),
+            key=f"conference_fallback_game_{season}_{conference}",
+        )
+        chosen_game = option_map[chosen_label]
+        target_week = st.selectbox(
+            "Move to week",
+            list(range(14)),
+            index=int(chosen_game.week),
+            key=f"conference_fallback_week_{season}_{conference}",
+        )
+        if st.button(
+            "Evaluate move",
+            use_container_width=True,
+            key=f"conference_fallback_go_{season}_{conference}",
+        ):
+            assessment = _direct_move_assessment(store, chosen_game, int(target_week))
+            if assessment.get("clean"):
+                old_week = int(chosen_game.week)
+                _set_workspace_move(season, chosen_game.game_id, int(target_week))
+                st.session_state[feedback_key] = {
+                    "kind": "success",
+                    "title": "Move accepted",
+                    "body": f"{chosen_game.away_team} @ {chosen_game.home_team}: Week {old_week} → Week {int(target_week)}",
+                    "detail": "Both teams are clear in the target week. No secondary schedule move is required.",
+                }
+            else:
+                solutions = optimizer.solve(Intent(
+                    action="MOVE_GAME",
+                    season=season,
+                    target_week=int(target_week),
+                    team_a=chosen_game.home_team,
+                    team_b=chosen_game.away_team,
+                    preserve_fbs_conference_parity=False,
+                    max_additional_moves=8,
+                    summary="Conference-board conflict repair",
+                ))
+                st.session_state[feedback_key] = {
+                    "kind": "conflict",
+                    "title": "Move blocked",
+                    "body": f"{chosen_game.away_team} @ {chosen_game.home_team} cannot move directly to Week {int(target_week)}.",
+                    "detail": str(assessment.get("message", "A scheduling conflict exists.")),
+                    "solutions": solutions,
+                }
+            st.rerun()
         return
 
     games = []
@@ -2604,7 +2671,63 @@ def render_drag_move_lab(
     )
 
     if not SORTABLES_AVAILABLE:
-        st.info("Drag-and-drop requires the streamlit-sortables package. The deployment requirements file includes it.")
+        st.markdown(
+            '<div class="section-copy" style="margin:.2rem 0 .8rem 0">'
+            'Stable tap controls are active for this cloud build. Choose a game and destination week.'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        option_map = {
+            f"W{int(g.week)} · {g.away_team if g.home_team == selected_team else g.home_team} "
+            f"({'H' if g.home_team == selected_team else 'A'})": g
+            for g in team_games
+        }
+        chosen_label = st.selectbox(
+            "Game to move",
+            list(option_map.keys()),
+            key=f"team_fallback_game_{season}_{selected_team}",
+        )
+        chosen_game = option_map[chosen_label]
+        target_week = st.selectbox(
+            "Move to week",
+            list(range(14)),
+            index=int(chosen_game.week),
+            key=f"team_fallback_week_{season}_{selected_team}",
+        )
+        if st.button(
+            "Evaluate move",
+            use_container_width=True,
+            key=f"team_fallback_go_{season}_{selected_team}",
+        ):
+            assessment = _direct_move_assessment(store, chosen_game, int(target_week))
+            if assessment.get("clean"):
+                old_week = int(chosen_game.week)
+                _set_workspace_move(season, chosen_game.game_id, int(target_week))
+                st.session_state[f"move_feedback_{season}"] = {
+                    "kind": "success",
+                    "title": "Move accepted",
+                    "body": f"{chosen_game.away_team} @ {chosen_game.home_team}: Week {old_week} → Week {int(target_week)}",
+                    "detail": "Both teams are clear in the target week. No secondary schedule move is required.",
+                }
+            else:
+                solutions = optimizer.solve(Intent(
+                    action="MOVE_GAME",
+                    season=season,
+                    target_week=int(target_week),
+                    team_a=chosen_game.home_team,
+                    team_b=chosen_game.away_team,
+                    preserve_fbs_conference_parity=False,
+                    max_additional_moves=8,
+                    summary="Team-board conflict repair",
+                ))
+                st.session_state[f"move_feedback_{season}"] = {
+                    "kind": "conflict",
+                    "title": "Move blocked",
+                    "body": f"{chosen_game.away_team} @ {chosen_game.home_team} cannot move directly to Week {int(target_week)}.",
+                    "detail": str(assessment.get("message", "A scheduling conflict exists.")),
+                    "solutions": solutions,
+                }
+            st.rerun()
         return
 
     def token_for(game: Game) -> str:
