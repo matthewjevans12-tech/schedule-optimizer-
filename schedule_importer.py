@@ -14,7 +14,7 @@ GAME_COLUMNS = [
     "game_type", "guarantee", "contract_link", "earliest_week",
     "latest_week", "source", "last_verified", "confidence", "notes",
 ]
-TEAM_COLUMNS = ["name", "subdivision", "conference", "is_a4", "parity_managed"]
+TEAM_COLUMNS = ["name", "subdivision", "conference", "is_a4", "parity_managed", "logo_url"]
 SLOT_COLUMNS = ["team", "season", "week", "status", "location"]
 NEED_COLUMNS = ["team", "season", "week", "need_type", "location", "min_guarantee", "max_guarantee", "status", "notes"]
 
@@ -207,6 +207,7 @@ def load_schedule_upload(
         teams["name"] = teams["name"].map(_clean_text)
         teams["subdivision"] = teams["subdivision"].map(lambda v: _clean_text(v, "FBS").upper())
         teams["conference"] = teams["conference"].map(lambda v: _clean_text(v, "Independent"))
+        teams["logo_url"] = teams["logo_url"].map(_clean_text)
         teams["is_a4"] = teams["is_a4"].map(_bool)
         teams["parity_managed"] = teams["parity_managed"].map(lambda v: _bool(v, True))
     else:
@@ -226,6 +227,7 @@ def load_schedule_upload(
                     "conference": str(meta.get("conference", "Independent")),
                     "is_a4": bool(meta.get("is_a4", False)),
                     "parity_managed": bool(meta.get("parity_managed", True)),
+                    "logo_url": str(meta.get("logo_url", "") or ""),
                 })
             else:
                 unknown.append(name)
@@ -235,6 +237,7 @@ def load_schedule_upload(
                     "conference": "Unknown",
                     "is_a4": False,
                     "parity_managed": False,
+                    "logo_url": "",
                 })
         teams = pd.DataFrame(rows)
         if unknown:

@@ -5,6 +5,7 @@ import json
 import os
 from dataclasses import asdict, replace
 from datetime import datetime
+from html import escape as html_escape
 from typing import Dict, List, Optional, Set, Tuple
 
 import pandas as pd
@@ -30,8 +31,8 @@ from workspace_db import WorkspaceDB
 
 
 st.set_page_config(
-    page_title="Schedule OS",
-    page_icon="◫",
+    page_title="Schedule OS · College Football Scheduling",
+    page_icon="🏈",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -301,6 +302,118 @@ small,.stCaption,[data-testid="stCaptionContainer"]{font-size:11px!important;col
   .kpi-grid,.task-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
   .decision-validation{grid-template-columns:1fr}.validation-col:first-child{border-right:none;border-bottom:1px solid var(--line)}
 }
+
+
+/* ================================================================
+   V10 ELITE VISUAL SYSTEM — inspired by the approved design concept
+   ================================================================ */
+:root{
+  --v10-navy:#071A2D;
+  --v10-navy-2:#0B233B;
+  --v10-blue:#246BFD;
+  --v10-blue-2:#1858DB;
+  --v10-blue-soft:#EEF4FF;
+  --v10-text:#0F1724;
+  --v10-muted:#526173;
+  --v10-subtle:#7C8999;
+  --v10-line:#DCE4ED;
+  --v10-line-soft:#E9EEF4;
+  --v10-bg:#F5F7FA;
+  --v10-green:#178653;
+  --v10-green-soft:#EAF8F0;
+  --v10-amber:#A76300;
+  --v10-red:#D2473D;
+}
+.block-container{max-width:1540px!important;padding:1.25rem 1.75rem 5rem!important}
+[data-testid="stSidebar"]{min-width:252px!important;max-width:252px!important;background:linear-gradient(180deg,#071A2D 0%,#061526 100%)!important}
+[data-testid="stSidebar"]>div:first-child{padding:1rem .85rem!important}
+[data-testid="stSidebar"] .stRadio div[role="radiogroup"] label{min-height:42px!important;padding:9px 10px!important;border-radius:9px!important}
+[data-testid="stSidebar"] .stRadio div[role="radiogroup"] label:has(input:checked){background:#153B68!important;box-shadow:inset 2px 0 0 #6DA0FF!important}
+.sidebar-brand{padding:5px 5px 18px!important}
+.sidebar-mark{font-size:16px!important;gap:9px!important}
+.sidebar-logo{width:29px!important;height:29px!important;border-radius:8px!important;background:linear-gradient(145deg,#397BFF,#1C58D6)!important;box-shadow:none!important}
+.sidebar-sub{color:#9DB2C8!important}
+.sidebar-section{color:#8097AF!important}
+
+.app-header{margin:0 0 16px!important;padding-bottom:16px!important}
+.app-title{font-size:28px!important;font-weight:780!important;color:#0E1622!important}
+.app-subtitle{font-size:14px!important;color:#5C6979!important}
+.meta-chip{background:#fff!important;border-color:#DCE4ED!important;color:#4C5A6A!important;box-shadow:0 1px 2px rgba(15,23,36,.02)!important}
+
+.entity-bar{border-radius:14px!important;padding:13px 15px!important;border-color:#DCE4ED!important;box-shadow:0 2px 8px rgba(15,23,36,.03)!important}
+.entity-avatar{background:#fff!important;border:1px solid #E2E8F0!important;overflow:hidden!important;color:#102033!important}
+.entity-avatar img{width:100%;height:100%;object-fit:contain;padding:4px}
+.entity-name{font-weight:760!important}
+.entity-meta{color:#5F6C7C!important}
+
+.task-grid{gap:10px!important;margin-top:8px!important;margin-bottom:8px!important}
+.task-card{border-radius:12px!important;min-height:102px!important;padding:14px!important;border-color:#DCE4ED!important;box-shadow:0 1px 2px rgba(15,23,36,.02)!important}
+.task-card:hover{border-color:#B9C9DA!important;box-shadow:0 7px 18px rgba(15,23,36,.055)!important;transform:translateY(-1px)}
+.task-card.active{border-color:#78A2FF!important;background:#F6F9FF!important;box-shadow:0 0 0 2px rgba(36,107,253,.11)!important}
+.task-icon{width:31px!important;height:31px!important;border-radius:50%!important;background:#F0F5FF!important}
+.task-title{font-size:14px!important;color:#101927!important;font-weight:760!important}
+.task-sub{font-size:12px!important;color:#627083!important}
+
+/* forms: pure white, decisive contrast */
+div[data-baseweb="select"]>div,.stTextInput input,.stTextArea textarea,.stNumberInput input,.stMultiSelect [data-baseweb="select"]>div{
+  background:#fff!important;border-color:#CDD7E3!important;color:#182333!important;border-radius:9px!important;box-shadow:none!important
+}
+.stSelectbox label,.stTextInput label,.stTextArea label,.stNumberInput label,.stMultiSelect label,.stSlider label,.stCheckbox label{
+  color:#536174!important;font-size:12px!important;font-weight:650!important
+}
+.stButton>button{border-radius:9px!important;font-weight:720!important;min-height:42px!important}
+.stButton>button[kind="primary"],.stButton>button[data-testid="baseButton-primary"]{
+  background:linear-gradient(180deg,#2A70FF 0%,#1E61EA 100%)!important;border-color:#1E61EA!important;box-shadow:0 5px 12px rgba(36,107,253,.22)!important
+}
+.stButton>button[kind="primary"] *,.stButton>button[data-testid="baseButton-primary"] *{color:#fff!important}
+[data-testid="stExpander"]{border-color:#D7E0EA!important;border-radius:10px!important;background:#fff!important}
+
+/* Brand/logo system */
+.team-logo-shell{display:inline-flex;align-items:center;justify-content:center;background:#fff;border:1px solid #E4EAF1;border-radius:10px;flex:0 0 auto;overflow:hidden}
+.team-logo-img{width:100%;height:100%;object-fit:contain;padding:3px;display:block}
+.team-logo-fallback{width:100%;height:100%;display:flex;align-items:center;justify-content:center;background:linear-gradient(145deg,#102B46,#173D60);color:#fff;font-size:11px;font-weight:850;letter-spacing:.02em}
+.team-inline{display:flex;align-items:center;gap:9px;min-width:0}.team-inline-name{font-weight:720;color:#111B29;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* single-team strip: more branded */
+.schedule-shell{border-radius:14px!important;border-color:#DCE4ED!important;box-shadow:0 2px 10px rgba(15,23,36,.035)!important}
+.schedule-top{padding:12px 14px!important;background:#fff!important}
+.schedule-title{font-weight:760!important;color:#101927!important}
+.week-strip{grid-template-columns:repeat(14,minmax(104px,1fr))!important;gap:6px!important;min-width:1530px!important}
+.week-card{min-height:132px!important;border-radius:10px!important;border-color:#E1E7EE!important;padding:9px!important;box-shadow:0 1px 2px rgba(15,23,36,.015)!important}
+.week-card:hover{border-color:#B9C9DA!important;box-shadow:0 5px 12px rgba(15,23,36,.055)!important}
+.week-logo{display:flex;justify-content:center;margin:10px 0 5px}
+.week-num{color:#778597!important}.week-opp{text-align:center!important;margin-top:3px!important;font-size:12px!important;font-weight:740!important;line-height:1.22!important}
+.week-site{text-align:center!important;font-size:9px!important}.week-open{text-align:center!important;color:#8D98A6!important}
+
+/* multi-team scheduling board — the centerpiece */
+.board-shell{background:#fff;border:1px solid #D8E1EB;border-radius:14px;overflow:hidden;box-shadow:0 5px 18px rgba(15,23,36,.04);margin:14px 0 18px}
+.board-head{display:flex;align-items:center;justify-content:space-between;padding:13px 15px;border-bottom:1px solid #E4EAF1;background:#FBFCFE}
+.board-title{font-size:14px;font-weight:780;color:#101927}.board-sub{font-size:11px;color:#718094}
+.board-scroll{overflow-x:auto}.schedule-board{display:grid;grid-template-columns:150px repeat(14,minmax(76px,1fr));min-width:1320px}
+.board-cell{min-height:83px;border-right:1px solid #EBEFF4;border-bottom:1px solid #EBEFF4;padding:7px 5px;background:#fff;display:flex;align-items:center;justify-content:center;text-align:center;position:relative}
+.board-cell.header{min-height:38px;background:#F8FAFC;color:#6D7B8C;font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.04em}
+.board-cell.team{justify-content:flex-start;text-align:left;gap:8px;padding:9px 10px;background:#FBFCFE;position:sticky;left:0;z-index:2}
+.board-team-name{font-size:11px;font-weight:760;color:#162130;line-height:1.15}.board-team-meta{font-size:9px;color:#8995A5;margin-top:2px}
+.board-game{font-size:9.5px;font-weight:690;color:#1B2736;line-height:1.14;margin-top:4px;max-width:68px;overflow:hidden;text-overflow:ellipsis}
+.board-site{font-size:8px;color:#7B8797;margin-top:2px}.board-open{font-size:9px;color:#98A3B1}.board-cell.candidate{background:#F5F8FF;box-shadow:inset 0 0 0 2px #4E86FF}.board-cell.blocked{background:#FFF8F7;box-shadow:inset 0 0 0 1px #F09B95}.board-cell.accepted{background:#F4FBF7;box-shadow:inset 0 0 0 1px #72C89D}
+.board-mini-logo{margin:auto}
+
+/* right recommendation rail */
+.solution-rail{border:1px solid #BCE3CD;background:linear-gradient(180deg,#F5FCF8 0%,#FFFFFF 38%);border-radius:14px;padding:16px;box-shadow:0 7px 24px rgba(22,131,93,.06);margin-bottom:12px}
+.solution-rail.neutral{border-color:#DCE4ED;background:#fff;box-shadow:0 4px 16px rgba(15,23,36,.035)}
+.solution-label{display:flex;align-items:center;gap:7px;font-size:12px;font-weight:800;color:#147A4E}.solution-check{width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:#20A565;color:#fff;font-size:12px}
+.solution-label.neutral{color:#536174}.solution-check.neutral{background:#EDF2F7;color:#64748B}
+.solution-title{font-size:17px;font-weight:790;color:#101927;letter-spacing:-.02em;margin:12px 0 3px}.solution-copy{font-size:12px;color:#5C6A7B;line-height:1.48}.solution-metric-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:13px}.solution-metric{padding:9px 6px;border-top:1px solid #E4EAEF;text-align:center}.solution-metric strong{display:block;font-size:15px;color:#172231}.solution-metric span{font-size:8px;color:#7B8797;text-transform:uppercase;letter-spacing:.05em;font-weight:760}
+.rail-section{background:#fff;border:1px solid #DCE4ED;border-radius:14px;padding:15px;margin-bottom:12px}.rail-section-title{font-size:13px;font-weight:780;color:#14202E;margin-bottom:9px}.rail-text{font-size:12px;color:#5F6D7C;line-height:1.5}.rail-team{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 0;border-top:1px solid #EEF2F6}.rail-team:first-of-type{border-top:none}.rail-team-left{display:flex;align-items:center;gap:8px;min-width:0}.rail-team-name{font-size:11px;font-weight:700;color:#182333;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.rail-status{font-size:9px;font-weight:750;border-radius:999px;padding:4px 6px;background:#F4F6F8;color:#6A7787;white-space:nowrap}.rail-status.good{background:#EAF8F0;color:#178653}.rail-status.pending{background:#FFF4DD;color:#9A6200}
+
+/* main solve layout */
+.solve-grid{display:grid;grid-template-columns:minmax(0,1fr) 330px;gap:14px;align-items:start}
+@media(max-width:1250px){.solve-grid{grid-template-columns:1fr}.solution-column{display:none}}
+
+/* premium approval chips with logos */
+.approval-pill{display:inline-flex!important;align-items:center!important;gap:5px!important}
+.tx-team-line{display:flex;align-items:center;gap:8px}
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -970,6 +1083,65 @@ def _safe_internal_week(value) -> Optional[int]:
         return None
 
 
+TEAM_LOGOS: Dict[str, str] = {}
+
+
+def _register_logo_map(teams_df: Optional[pd.DataFrame], games_df: Optional[pd.DataFrame]) -> None:
+    """Populate the runtime logo registry from public/authoritative data.
+
+    Public prototype mode already provides logo_url for the FBS/FCS directory.
+    Authoritative data can optionally include logo_url on the Teams sheet.
+    Game-level home_logo/away_logo are used as a second source.
+    """
+    TEAM_LOGOS.clear()
+    if teams_df is not None and len(teams_df):
+        if "logo_url" in teams_df.columns:
+            for _, row in teams_df.iterrows():
+                name = str(row.get("name", "") or "").strip()
+                logo = str(row.get("logo_url", "") or "").strip()
+                if name and logo and logo.lower() not in {"nan", "none"}:
+                    TEAM_LOGOS[name] = logo
+    if games_df is not None and len(games_df):
+        for _, row in games_df.iterrows():
+            home = str(row.get("home_team", "") or "").strip()
+            away = str(row.get("away_team", "") or "").strip()
+            home_logo = str(row.get("home_logo", "") or "").strip()
+            away_logo = str(row.get("away_logo", "") or "").strip()
+            if home and home_logo and home_logo.lower() not in {"nan", "none"}:
+                TEAM_LOGOS.setdefault(home, home_logo)
+            if away and away_logo and away_logo.lower() not in {"nan", "none"}:
+                TEAM_LOGOS.setdefault(away, away_logo)
+
+
+def _team_logo_html(name: str, size: int = 34, radius: int = 9) -> str:
+    safe_name = html_escape(str(name))
+    initials = html_escape(_team_initials(name))
+    logo = TEAM_LOGOS.get(str(name), "")
+    shell = f'width:{size}px;height:{size}px;border-radius:{radius}px'
+    if logo:
+        safe_logo = html_escape(logo, quote=True)
+        return (
+            f'<span class="team-logo-shell" style="{shell}">'
+            f'<img class="team-logo-img" src="{safe_logo}" alt="{safe_name} logo" '
+            f'onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'flex\'">'
+            f'<span class="team-logo-fallback" style="display:none">{initials}</span></span>'
+        )
+    return f'<span class="team-logo-shell" style="{shell}"><span class="team-logo-fallback">{initials}</span></span>'
+
+
+def _team_inline_html(name: str, size: int = 28) -> str:
+    return (
+        f'<span class="team-inline">{_team_logo_html(name, size=size, radius=max(7, size//4))}'
+        f'<span class="team-inline-name">{html_escape(str(name))}</span></span>'
+    )
+
+
+def _team_meta_text(store: Optional[ScheduleStore], team: str) -> str:
+    if store is None or team not in store.teams:
+        return ""
+    obj = store.teams[team]
+    return f"{obj.conference} · {obj.subdivision}"
+
 def _team_initials(name: str) -> str:
     parts = [p for p in str(name).replace("&", " ").split() if p]
     if not parts:
@@ -1030,7 +1202,8 @@ def render_schedule_strip(
         site_class = site.lower()
         cards.append(
             f'<div class="week-card{css}"><div class="week-num">Week {display_week(week)}</div>'
-            f'<div class="week-opp">{opp}</div><div class="week-site {site_class}">{site}</div></div>'
+            f'<div class="week-logo">{_team_logo_html(opp, 34, 9)}</div>'
+            f'<div class="week-opp">{html_escape(opp)}</div><div class="week-site {site_class}">{html_escape(site)}</div></div>'
         )
 
     tba_html = ""
@@ -1050,6 +1223,140 @@ def render_schedule_strip(
         unsafe_allow_html=True,
     )
 
+
+def render_schedule_board(
+    games_df: pd.DataFrame,
+    teams: List[str],
+    year: int,
+    *,
+    store: Optional[ScheduleStore] = None,
+    candidate_moves: Optional[List[Move]] = None,
+    title: Optional[str] = None,
+):
+    """Compact multi-team, 14-week operations board inspired by the approved UI concept."""
+    candidate_moves = candidate_moves or []
+    move_from = {(m.game_id, int(m.from_week)) for m in candidate_moves}
+    move_to_by_team_week: Dict[Tuple[str, int], Move] = {}
+    for m in candidate_moves:
+        move_to_by_team_week[(m.home_team, int(m.to_week))] = m
+        move_to_by_team_week[(m.away_team, int(m.to_week))] = m
+
+    rows_html = []
+    # header
+    headers = ['<div class="board-cell header">Team</div>'] + [
+        f'<div class="board-cell header">W{display_week(w)}</div>' for w in range(14)
+    ]
+    rows_html.append(''.join(headers))
+
+    year_mask = pd.to_numeric(games_df["season"], errors="coerce") == int(year)
+    for team in teams:
+        subset = games_df[year_mask & ((games_df["home_team"] == team) | (games_df["away_team"] == team))].copy()
+        dated: Dict[int, pd.Series] = {}
+        for _, row in subset.iterrows():
+            week = _safe_internal_week(row.get("week"))
+            if week is not None and week not in dated:
+                dated[week] = row
+
+        meta = _team_meta_text(store, team)
+        team_cell = (
+            f'<div class="board-cell team">{_team_logo_html(team, 34, 9)}<div>'
+            f'<div class="board-team-name">{html_escape(team)}</div>'
+            f'<div class="board-team-meta">{html_escape(meta)}</div></div></div>'
+        )
+        cells = [team_cell]
+        for week in range(14):
+            proposed = move_to_by_team_week.get((team, week))
+            if proposed:
+                opp = proposed.away_team if proposed.home_team == team else proposed.home_team
+                site = "Home" if proposed.home_team == team else "Away"
+                cells.append(
+                    f'<div class="board-cell candidate"><div><div class="board-mini-logo">{_team_logo_html(opp, 25, 7)}</div>'
+                    f'<div class="board-game">{html_escape(opp)}</div><div class="board-site">{site} · proposed</div></div></div>'
+                )
+                continue
+            row = dated.get(week)
+            if row is None:
+                cells.append('<div class="board-cell"><div class="board-open">Open</div></div>')
+                continue
+            opp, site = _schedule_row_view(row, team)
+            status = str(row.get("game_status", "") or "").upper()
+            moveability = str(row.get("moveability", "") or "").upper()
+            css = ""
+            if moveability == "LOCKED": css = " blocked"
+            elif status in {"PENDING", "HOLD", "CONCEPT"}: css = " candidate"
+            cells.append(
+                f'<div class="board-cell{css}"><div><div class="board-mini-logo">{_team_logo_html(opp, 25, 7)}</div>'
+                f'<div class="board-game">{html_escape(opp)}</div><div class="board-site">{html_escape(site)}</div></div></div>'
+            )
+        rows_html.append(''.join(cells))
+
+    st.markdown(
+        f'<div class="board-shell"><div class="board-head"><div class="board-title">{html_escape(title or f"{year} Schedule Board")}</div>'
+        f'<div class="board-sub">{len(teams)} teams · Weeks 1–14</div></div>'
+        f'<div class="board-scroll"><div class="schedule-board">{"".join(rows_html)}</div></div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_solution_sidecar(
+    engine: AdvancedNonConferenceOptimizer,
+    sol: Optional[Solution],
+    *,
+    season: int,
+    selected_game: Optional[Game] = None,
+    data_status: str = "",
+):
+    if not sol:
+        st.markdown(
+            '<div class="solution-rail neutral"><div class="solution-label neutral">'
+            '<span class="solution-check neutral">◇</span>Optimizer ready</div>'
+            '<div class="solution-title">Define the outcome</div>'
+            '<div class="solution-copy">The recommendation, affected schools and approval impact will appear here after the solve.</div>'
+            '<div class="solution-metric-grid"><div class="solution-metric"><strong>—</strong><span>Moves</span></div>'
+            '<div class="solution-metric"><strong>—</strong><span>Schools</span></div><div class="solution-metric"><strong>—</strong><span>Risk</span></div></div></div>',
+            unsafe_allow_html=True,
+        )
+        return
+
+    md = dict(sol.metadata or {})
+    affected = sorted({s for m in sol.moves for s in (m.home_team, m.away_team)})
+    proven = bool(md.get("lexicographic_proven", False))
+    before = engine.store.copy_games()
+    after = apply_moves(before, sol)
+    new_odd = odd_keys(engine, after, season) - odd_keys(engine, before, season)
+    risk = "Low" if not new_odd else "Review"
+    first = sol.moves[0] if sol.moves else None
+    move_title = f"{first.away_team} @ {first.home_team}" if first else "Recommended solution"
+    copy = (
+        f"Moves {move_title} to Week {display_week(first.to_week)} with the smallest coordinated repair path."
+        if first else "Feasible coordinated solution."
+    )
+    st.markdown(
+        f'<div class="solution-rail"><div class="solution-label"><span class="solution-check">✓</span>Recommended solution</div>'
+        f'<div class="solution-title">{len(sol.moves)} change{"s" if len(sol.moves)!=1 else ""}</div>'
+        f'<div class="solution-copy">{html_escape(copy)}</div>'
+        f'<div class="solution-metric-grid"><div class="solution-metric"><strong>{len(sol.moves)}</strong><span>Moves</span></div>'
+        f'<div class="solution-metric"><strong>{len(affected)}</strong><span>Schools</span></div>'
+        f'<div class="solution-metric"><strong>{risk}</strong><span>Disruption</span></div></div></div>',
+        unsafe_allow_html=True,
+    )
+
+    why = "Minimum number of changes proven." if proven else "Best path found within the interactive solve window."
+    st.markdown(
+        f'<div class="rail-section"><div class="rail-section-title">Why this works</div>'
+        f'<div class="rail-text">{html_escape(why)} {"Conference parity is protected." if not new_odd else "Review parity impact before sending."}</div></div>',
+        unsafe_allow_html=True,
+    )
+    teams_html=[]
+    for team in affected:
+        teams_html.append(
+            f'<div class="rail-team"><div class="rail-team-left">{_team_logo_html(team, 27, 7)}'
+            f'<div class="rail-team-name">{html_escape(team)}</div></div><span class="rail-status good">Affected</span></div>'
+        )
+    st.markdown(
+        f'<div class="rail-section"><div class="rail-section-title">Affected schools · {len(affected)}</div>{"".join(teams_html)}</div>',
+        unsafe_allow_html=True,
+    )
 
 def render_all_years(games_df: pd.DataFrame, team: str, *, authoritative: bool = False):
     subset = games_df[(games_df["home_team"] == team) | (games_df["away_team"] == team)].copy()
@@ -1603,7 +1910,7 @@ def render_school_impacts(sol: Solution):
     for idx, school in enumerate(sorted(impacts)):
         with cols[idx % len(cols)]:
             with st.container(border=True):
-                st.markdown(f"**{school}**")
+                st.markdown(_team_inline_html(school, 31), unsafe_allow_html=True)
                 for text in impacts[school]:
                     st.caption(text)
 
@@ -1627,7 +1934,8 @@ def transaction_card(tx: Dict[str, object], viewer: str):
     approval_html = []
     for school, astatus in approvals.items():
         approval_html.append(
-            f'<span class="approval-pill {str(astatus).lower()}">{school} · {str(astatus).title()}</span>'
+            f'<span class="approval-pill {str(astatus).lower()}">{_team_logo_html(school, 18, 5)}'
+            f'{html_escape(school)} · {html_escape(str(astatus).title())}</span>'
         )
 
     viewer_html = ""
@@ -1699,7 +2007,7 @@ def market_result_card(
     )
     st.markdown(
         f'<div class="market-premium"><div class="market-row"><div>'
-        f'<div class="market-title">{away} @ {home} · Week {display_week(week)}</div>'
+        f'<div class="market-title">{_team_logo_html(away, 26, 7)} {html_escape(away)} @ {_team_logo_html(home, 26, 7)} {html_escape(home)} · Week {display_week(week)}</div>'
         f'<div class="market-meta">{match.explanation}</div></div>'
         f'<span class="market-badge">{badge}</span></div></div>',
         unsafe_allow_html=True,
@@ -1957,8 +2265,8 @@ def render_app_header(
 
 def render_entity_bar(name: str, meta: str):
     st.markdown(
-        f'<div class="entity-bar"><div class="entity-avatar">{_team_initials(name)}</div>'
-        f'<div><div class="entity-name">{name}</div><div class="entity-meta">{meta}</div></div></div>',
+        f'<div class="entity-bar"><div class="entity-avatar">{_team_logo_html(name, 44, 12)}</div>'
+        f'<div><div class="entity-name">{html_escape(name)}</div><div class="entity-meta">{html_escape(meta)}</div></div></div>',
         unsafe_allow_html=True,
     )
 
@@ -2155,6 +2463,7 @@ else:
     all_games_df = pd.DataFrame([asdict(g) for g in demo.games.values()])
 
 all_games_df = apply_completed_transactions_to_dataframe(all_games_df, db)
+_register_logo_map(all_teams_df, all_games_df)
 
 available_years = sorted(int(y) for y in all_games_df["season"].dropna().unique())
 if not available_years:
@@ -2208,7 +2517,7 @@ if perspective == "School":
         subtitle={
             "Overview": "Everything that requires your attention, in one place.",
             "Schedule": "One authoritative view of current and future non-conference commitments.",
-            "Solve": "Define the outcome. The optimizer coordinates the affected schedules.",
+            "Solve": "Define the outcome. Schedule OS finds the lowest-disruption coordinated path.",
             "Needs": "Publish what you need and surface compatible scheduling inventory.",
             "Proposals": "Review, negotiate and approve coordinated schedule changes.",
         }[navigation],
@@ -2351,13 +2660,50 @@ if perspective == "School":
                         }
 
                 state = st.session_state.get(f"premium_result_{acting_school}")
+                sol = state.get("result") if state else None
+                run_store = store_with_locked(store, set(state.get("protected") or set())) if state else store
+                run_engine = AdvancedNonConferenceOptimizer(run_store, time_limit_seconds=6.0)
+
+                # Operations board: selected school + affected schools when solved,
+                # otherwise selected school + nearby conference peers for context.
+                if sol:
+                    board_teams = [acting_school] + [
+                        s for s in sorted({x for m in sol.moves for x in (m.home_team, m.away_team)})
+                        if s != acting_school
+                    ]
+                else:
+                    peers = [
+                        t.name for t in store.teams.values()
+                        if team_obj and t.conference == team_obj.conference and t.name != acting_school
+                    ]
+                    board_teams = [acting_school] + sorted(peers)[:5]
+                board_teams = board_teams[:7]
+
+                st.markdown('<div class="section-heading">Schedule board</div>', unsafe_allow_html=True)
+                board_col, rail_col = st.columns([3.25, 1.05], gap="medium")
+                with board_col:
+                    render_schedule_board(
+                        all_games_df,
+                        board_teams,
+                        int(season),
+                        store=store,
+                        candidate_moves=list(sol.moves) if sol else [],
+                        title=f"{season} Non-Conference Schedule Board",
+                    )
+                with rail_col:
+                    render_solution_sidecar(
+                        run_engine,
+                        sol,
+                        season=int(season),
+                        selected_game=selected_game,
+                        data_status=status_text,
+                    )
+
                 if state:
-                    sol = state.get("result")
-                    run_store = store_with_locked(store, set(state.get("protected") or set()))
-                    run_engine = AdvancedNonConferenceOptimizer(run_store, time_limit_seconds=6.0)
                     if sol:
-                        render_result(run_engine, sol, season=int(season), data_status=status_text)
-                        render_school_impacts(sol)
+                        with st.expander("Decision details", expanded=False):
+                            render_result(run_engine, sol, season=int(season), data_status=status_text)
+                            render_school_impacts(sol)
                         action_cols = st.columns([.7, .3])
                         with action_cols[0]:
                             if st.button(
