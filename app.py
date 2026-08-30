@@ -355,54 +355,151 @@ class NonConferenceOptimizer:
         solutions.sort(key=lambda s: (-s.score, len(s.moves)))
         return solutions[:5]
 
+    def _direct_parity_move_solution(self, base: Dict[str, Game], game: Game, to_week: int, intent: Intent) -> Optional[Solution]:
+        """Evaluate one direct game move without any cascade search.
+
+        Broad conference-parity requests should be fast. We therefore try direct
+        one-game fixes first and only invoke the recursive cascade solver when no
+        direct fix exists.
+        """
+        if game.locked or not game.moveable or to_week == game.week:
+            return None
+        if not self._can_use_week(base, game, to_week):
+            return None
+        if self._conflicts(base, game, to_week):
+            return None
+
+        new_games = dict(base)
+        new_games[game.game_id] = replace(game, week=to_week)
+        touched = {game.week, to_week}
+
+        target_status = self.conference_parity(new_games, intent.season, intent.target_week).get(intent.conference, "")
+        if not target_status.startswith("EVEN"):
+            return None
+
+        before_violations = self.parity_violation_count(base, intent.season, touched)
+        after_violations = self.parity_violation_count(new_games, intent.season, touched)
+        if intent.preserve_fbs_conference_parity and after_violations > before_violations:
+            return None
+
+        parity_before: Dict[str, str] = {}
+        parity_after: Dict[str, str] = {}
+        for week in sorted(touched):
+            for conf, status in self.conference_parity(base, intent.season, week).items():
+                parity_before[f"{conf} W{week}"] = status
+            for conf, status in self.conference_parity(new_games, intent.season, week).items():
+                parity_after[f"{conf} W{week}"] = status
+
+        move = Move(game.game_id, game.home_team, game.away_team, game.week, to_week)
+        distance = abs(to_week - game.week)
+        parity_delta = before_violations - after_violations
+        score = max(0, min(100, 100 - distance * 1.5 - after_violations * 8 + parity_delta * 8))
+        warnings = []
+        if after_violations:
+            warnings.append(f"{after_violations} FBS conference/week parity issue(s) remain in affected weeks.")
+        direction = "into" if to_week == intent.target_week else "out of"
+        explanation = (
+            f"Move {game.away_team} at {game.home_team} from Week {game.week} to Week {to_week}. "
+            f"This moves a {intent.conference} non-conference commitment {direction} Week {intent.target_week} "
+            f"and changes {intent.conference} Week {intent.target_week} to {target_status}."
+        )
+        return Solution(
+            title="1-move parity fix",
+            moves=[move],
+            score=round(score, 1),
+            parity_before=parity_before,
+            parity_after=parity_after,
+            warnings=warnings,
+            explanation=explanation,
+        )
+
     def solve_make_conference_even(self, intent: Intent) -> List[Solution]:
         if not intent.conference or intent.season is None or intent.target_week is None:
             return []
+
         base = self.store.copy_games()
         current = self.conference_parity(base, intent.season, intent.target_week).get(intent.conference)
         if current and current.startswith("EVEN"):
-            return [Solution(title="Already even", moves=[], score=100, explanation=f"{intent.conference} is already even in Week {intent.target_week}: {current}.")]
+            return [Solution(
+                title="Already even",
+                moves=[],
+                score=100,
+                explanation=f"{intent.conference} is already even in Week {intent.target_week}: {current}.",
+            )]
 
-        # Search moveable nonconference games involving a member of the conference.
         members = {t.name for t in self.store.conference_members(intent.conference)}
-        candidates = [g for g in base.values() if g.season == intent.season and g.moveable and not g.locked and (g.home_team in members or g.away_team in members)]
-        solutions: List[Solution] = []
 
-        # Option A: move a conference member's nonconf game INTO target week.
-        for game in candidates:
+        # Only a non-conference game involving exactly one member of the target
+        # conference can toggle that conference's weekly parity.
+        candidates: List[Game] = []
+        for g in base.values():
+            if g.season != intent.season or g.locked or not g.moveable:
+                continue
+            member_count = int(g.home_team in members) + int(g.away_team in members)
+            if member_count == 1:
+                candidates.append(g)
+
+        # PHASE 1: Fast direct fixes. This is the normal answer for a broad
+        # "make the conference even" request and avoids a national brute-force search.
+        direct: List[Solution] = []
+
+        # A) Move a target-conference nonconference game INTO the odd week.
+        for game in sorted(candidates, key=lambda g: (abs(g.week - intent.target_week), g.week, g.home_team, g.away_team)):
             if game.week == intent.target_week:
                 continue
-            temp_intent = Intent(
-                action="MOVE_GAME", season=intent.season, target_week=intent.target_week,
-                conference=intent.conference, team_a=game.home_team, team_b=game.away_team,
-                preserve_fbs_conference_parity=True, max_additional_moves=intent.max_additional_moves,
-                summary=intent.summary,
-            )
-            for sol in self.solve_move_game(temp_intent):
-                status = sol.parity_after.get(f"{intent.conference} W{intent.target_week}", "")
-                if status.startswith("EVEN"):
-                    solutions.append(sol)
+            sol = self._direct_parity_move_solution(base, game, intent.target_week, intent)
+            if sol:
+                direct.append(sol)
 
-        # Option B: move an existing target-week nonconference game OUT.
-        for game in candidates:
-            if game.week != intent.target_week:
-                continue
+        # B) Move a target-week nonconference game OUT to the closest feasible week.
+        for game in [g for g in candidates if g.week == intent.target_week]:
+            found_for_game = 0
             for alt_week in self._candidate_weeks(game):
+                sol = self._direct_parity_move_solution(base, game, alt_week, intent)
+                if sol:
+                    direct.append(sol)
+                    found_for_game += 1
+                    if found_for_game >= 3:
+                        break
+
+        if direct:
+            uniq: Dict[Tuple, Solution] = {}
+            for sol in direct:
+                sig = tuple((m.game_id, m.from_week, m.to_week) for m in sol.moves)
+                if sig not in uniq or sol.score > uniq[sig].score:
+                    uniq[sig] = sol
+            return sorted(uniq.values(), key=lambda s: (-s.score, len(s.moves)))[:5]
+
+        # PHASE 2: No direct fix exists. Search only the closest candidates and
+        # allow a small cascade. This keeps public-data mode responsive.
+        cascades: List[Solution] = []
+        nearest = sorted(candidates, key=lambda g: (0 if g.week == intent.target_week else 1, abs(g.week - intent.target_week)))[:16]
+
+        for game in nearest:
+            target_weeks = [intent.target_week] if game.week != intent.target_week else self._candidate_weeks(game)[:5]
+            for target in target_weeks:
                 temp_intent = Intent(
-                    action="MOVE_GAME", season=intent.season, target_week=alt_week,
-                    conference=intent.conference, team_a=game.home_team, team_b=game.away_team,
-                    preserve_fbs_conference_parity=True, max_additional_moves=intent.max_additional_moves,
+                    action="MOVE_GAME",
+                    season=intent.season,
+                    target_week=target,
+                    conference=intent.conference,
+                    team_a=game.home_team,
+                    team_b=game.away_team,
+                    preserve_fbs_conference_parity=True,
+                    max_additional_moves=min(2, intent.max_additional_moves),
                     summary=intent.summary,
                 )
                 for sol in self.solve_move_game(temp_intent):
                     status = sol.parity_after.get(f"{intent.conference} W{intent.target_week}", "")
                     if status.startswith("EVEN"):
-                        solutions.append(sol)
-                if len(solutions) >= 20:
+                        cascades.append(sol)
+                if len(cascades) >= 10:
                     break
+            if len(cascades) >= 10:
+                break
 
-        uniq = {}
-        for sol in solutions:
+        uniq: Dict[Tuple, Solution] = {}
+        for sol in cascades:
             sig = tuple(sorted((m.game_id, m.from_week, m.to_week) for m in sol.moves))
             if sig not in uniq or sol.score > uniq[sig].score:
                 uniq[sig] = sol
@@ -869,95 +966,133 @@ def _conference_from_soup(soup: BeautifulSoup) -> str:
     return "Unknown"
 
 
-def _week_for_2028(date_iso: str | None) -> int | None:
+
+def _labor_day(year: int) -> date:
+    d = date(year, 9, 1)
+    return d + timedelta(days=(7 - d.weekday()) % 7)
+
+
+def _week_for_season(date_iso: str | None, season: int) -> int | None:
+    """Map a date to college-football Week 0..13 using Labor Day weekend as Week 1."""
     if not date_iso:
         return None
     d = datetime.strptime(date_iso, "%Y-%m-%d").date()
-    first_sat = date(2028, 8, 26)  # Week Zero
-    days_until_sat = (5 - d.weekday()) % 7  # Monday=0, Saturday=5
+    week1_sat = _labor_day(season) - timedelta(days=2)
+    week0_sat = week1_sat - timedelta(days=7)
+    days_until_sat = (5 - d.weekday()) % 7
     week_sat = d + timedelta(days=days_until_sat)
-    return (week_sat - first_sat).days // 7
+    return (week_sat - week0_sat).days // 7
 
 
-def _parse_2028_entries(soup: BeautifulSoup, current_slug: str, current_name: str, source_url: str) -> list[dict]:
-    heading = None
-    for tag in soup.find_all(["h4", "h3"]):
-        if tag.get_text(" ", strip=True) == "2028":
-            heading = tag
-            break
-    if not heading:
-        return []
+def _week_saturday(season: int, week: int) -> date:
+    week1_sat = _labor_day(season) - timedelta(days=2)
+    week0_sat = week1_sat - timedelta(days=7)
+    return week0_sat + timedelta(days=7 * week)
 
-    ul = None
-    sibling = heading.next_sibling
-    while sibling is not None:
-        name = getattr(sibling, "name", None)
-        if name in {"h3", "h4"}:
-            break
-        if name == "ul":
-            ul = sibling
-            break
-        sibling = sibling.next_sibling
-    if ul is None:
-        ul = heading.find_next("ul")
-    if ul is None:
-        return []
 
-    rows = []
-    for li in ul.find_all("li", recursive=False):
-        txt = " ".join(li.get_text(" ", strip=True).split())
-        m = re.match(r"^(TBA|\d{2}/\d{2})\s*-\s*(.+)$", txt, flags=re.I)
-        if not m:
+def _school_logo_from_soup(soup: BeautifulSoup, school_name: str, source_url: str) -> str:
+    """Best-effort public school image/logo URL from the team page."""
+    candidates = []
+    school_tokens = {t.lower() for t in re.findall(r"[A-Za-z0-9]+", school_name) if len(t) > 2}
+    for img in soup.find_all("img"):
+        src = img.get("src") or img.get("data-src") or img.get("data-lazy-src") or ""
+        if not src or src.startswith("data:"):
             continue
-        date_token, rest = m.group(1).upper(), m.group(2).strip()
-        date_iso = None
-        if date_token != "TBA":
-            try:
-                date_iso = datetime.strptime(f"2028/{date_token}", "%Y/%m/%d").date().isoformat()
-            except ValueError:
-                date_iso = None
+        alt = (img.get("alt") or "").lower()
+        classes = " ".join(img.get("class") or []).lower()
+        score = 0
+        if "football schedule" in alt:
+            score += 5
+        if school_name.lower() in alt:
+            score += 5
+        score += sum(1 for token in school_tokens if token in alt)
+        if any(k in classes for k in ("team", "logo", "school")):
+            score += 2
+        if score:
+            candidates.append((score, urljoin(source_url, src)))
+    if candidates:
+        candidates.sort(reverse=True)
+        return candidates[0][1]
+    og = soup.find("meta", attrs={"property": "og:image"})
+    if og and og.get("content"):
+        return urljoin(source_url, og["content"])
+    return ""
 
-        site = "Home"
-        rest_lower = rest.lower()
-        if rest_lower.startswith("at "):
-            site = "Away"
-        elif rest_lower.startswith("vs "):
-            site = "Neutral"
 
-        opp_link = None
-        for a in li.find_all("a", href=True):
-            if "/ncaa/" in a["href"]:
-                opp_link = a
+def _parse_entries_for_years(soup: BeautifulSoup, current_slug: str, current_name: str, source_url: str, years: Iterable[int]) -> list[dict]:
+    rows: list[dict] = []
+    for season in sorted({int(y) for y in years}):
+        heading = None
+        for tag in soup.find_all(["h4", "h3"]):
+            if tag.get_text(" ", strip=True) == str(season):
+                heading = tag
                 break
-        opponent_name = opp_link.get_text(" ", strip=True) if opp_link else ""
-        opponent_url = urljoin(source_url, opp_link["href"]) if opp_link else ""
-        opponent_slug = urlparse(opponent_url).path.strip("/").split("/")[-1] if opponent_url else ""
-        if not opponent_name:
-            cleaned = re.sub(r"^(?:at|vs)\s+", "", rest, flags=re.I)
-            cleaned = re.sub(r"\s*\(in .+\)\s*$", "", cleaned).strip()
-            opponent_name = cleaned
-
-        neutral_location = ""
-        n = re.search(r"\(in\s+(.+?)\)\s*$", rest, flags=re.I)
-        if n:
-            neutral_location = n.group(1).strip()
-
-        rows.append({
-            "season": 2028,
-            "date": date_iso or "TBA",
-            "week": _week_for_2028(date_iso),
-            "current_slug": current_slug,
-            "team": current_name,
-            "opponent_slug": opponent_slug,
-            "opponent": opponent_name,
-            "site_for_team": site,
-            "neutral_location": neutral_location,
-            "source_url": source_url,
-        })
+        if not heading:
+            continue
+        ul = None
+        sibling = heading.next_sibling
+        while sibling is not None:
+            name = getattr(sibling, "name", None)
+            if name in {"h3", "h4"}:
+                break
+            if name == "ul":
+                ul = sibling
+                break
+            sibling = sibling.next_sibling
+        if ul is None:
+            ul = heading.find_next("ul")
+        if ul is None:
+            continue
+        for li in ul.find_all("li", recursive=False):
+            txt = " ".join(li.get_text(" ", strip=True).split())
+            m = re.match(r"^(TBA|\d{2}/\d{2})\s*-\s*(.+)$", txt, flags=re.I)
+            if not m:
+                continue
+            date_token, rest = m.group(1).upper(), m.group(2).strip()
+            date_iso = None
+            if date_token != "TBA":
+                try:
+                    date_iso = datetime.strptime(f"{season}/{date_token}", "%Y/%m/%d").date().isoformat()
+                except ValueError:
+                    date_iso = None
+            site = "Home"
+            rest_lower = rest.lower()
+            if rest_lower.startswith("at "):
+                site = "Away"
+            elif rest_lower.startswith("vs "):
+                site = "Neutral"
+            opp_link = None
+            for a in li.find_all("a", href=True):
+                if "/ncaa/" in a["href"]:
+                    opp_link = a
+                    break
+            opponent_name = opp_link.get_text(" ", strip=True) if opp_link else ""
+            opponent_url = urljoin(source_url, opp_link["href"]) if opp_link else ""
+            opponent_slug = urlparse(opponent_url).path.strip("/").split("/")[-1] if opponent_url else ""
+            if not opponent_name:
+                cleaned = re.sub(r"^(?:at|vs)\s+", "", rest, flags=re.I)
+                cleaned = re.sub(r"\s*\(in .+\)\s*$", "", cleaned).strip()
+                opponent_name = cleaned
+            neutral_location = ""
+            n = re.search(r"\(in\s+(.+?)\)\s*$", rest, flags=re.I)
+            if n:
+                neutral_location = n.group(1).strip()
+            rows.append({
+                "season": season,
+                "date": date_iso or "TBA",
+                "week": _week_for_season(date_iso, season),
+                "current_slug": current_slug,
+                "team": current_name,
+                "opponent_slug": opponent_slug,
+                "opponent": opponent_name,
+                "site_for_team": site,
+                "neutral_location": neutral_location,
+                "source_url": source_url,
+            })
     return rows
 
 
-def _scrape_one_team(url: str) -> tuple[dict, list[dict]]:
+def _scrape_one_team(url: str, years: tuple[int, ...]) -> tuple[dict, list[dict]]:
     html = _safe_get(url)
     soup = BeautifulSoup(html, "html.parser")
     slug = urlparse(url).path.strip("/").split("/")[-1]
@@ -972,34 +1107,34 @@ def _scrape_one_team(url: str) -> tuple[dict, list[dict]]:
         "is_a4": conference in A4_CONFERENCES,
         "parity_managed": subdivision == "FBS" and conference != "FBS Independent",
         "source_url": url,
+        "logo_url": _school_logo_from_soup(soup, name, url),
     }
-    return team, _parse_2028_entries(soup, slug, name, url)
+    return team, _parse_entries_for_years(soup, slug, name, url, years)
 
 
 def _dedupe_scraped_games(raw_rows: list[dict], team_by_slug: dict[str, dict]) -> pd.DataFrame:
-    known_dates: dict[tuple[str, str], set[str]] = {}
+    known_dates: dict[tuple[int, str, str], set[str]] = {}
     for r in raw_rows:
         a = r["current_slug"] or r["team"].lower()
         b = r["opponent_slug"] or r["opponent"].lower()
         pair = tuple(sorted((a, b)))
         if r["date"] != "TBA":
-            known_dates.setdefault(pair, set()).add(r["date"])
-
+            known_dates.setdefault((int(r["season"]), *pair), set()).add(r["date"])
     games: dict[tuple, dict] = {}
     for r in raw_rows:
+        season = int(r["season"])
         a_key = r["current_slug"] or r["team"].lower()
         b_key = r["opponent_slug"] or r["opponent"].lower()
         pair = tuple(sorted((a_key, b_key)))
         event_date = r["date"]
-        if event_date == "TBA" and len(known_dates.get(pair, set())) == 1:
-            event_date = next(iter(known_dates[pair]))
-        key = (pair, event_date)
-
+        dates = known_dates.get((season, *pair), set())
+        if event_date == "TBA" and len(dates) == 1:
+            event_date = next(iter(dates))
+        key = (season, pair, event_date)
         current_meta = team_by_slug.get(r["current_slug"], {})
         opp_meta = team_by_slug.get(r["opponent_slug"], {})
         current_name = current_meta.get("name", r["team"])
         opp_name = opp_meta.get("name", r["opponent"])
-
         if r["site_for_team"] == "Away":
             home, away = opp_name, current_name
             home_meta, away_meta = opp_meta, current_meta
@@ -1012,12 +1147,11 @@ def _dedupe_scraped_games(raw_rows: list[dict], team_by_slug: dict[str, dict]) -
             home, away = current_name, opp_name
             home_meta, away_meta = current_meta, opp_meta
             neutral = False
-
         if key not in games:
             games[key] = {
-                "season": 2028,
+                "season": season,
                 "date": event_date,
-                "week": _week_for_2028(event_date if event_date != "TBA" else None),
+                "week": _week_for_season(event_date if event_date != "TBA" else None, season),
                 "home_team": home,
                 "away_team": away,
                 "neutral": neutral,
@@ -1026,6 +1160,8 @@ def _dedupe_scraped_games(raw_rows: list[dict], team_by_slug: dict[str, dict]) -
                 "away_subdivision": away_meta.get("subdivision", "Unknown"),
                 "home_conference": home_meta.get("conference", "Unknown"),
                 "away_conference": away_meta.get("conference", "Unknown"),
+                "home_logo": home_meta.get("logo_url", ""),
+                "away_logo": away_meta.get("logo_url", ""),
                 "source_urls": {r["source_url"]},
             }
         else:
@@ -1034,7 +1170,6 @@ def _dedupe_scraped_games(raw_rows: list[dict], team_by_slug: dict[str, dict]) -
                 games[key]["neutral_location"] = r["neutral_location"]
             if r["site_for_team"] == "Neutral":
                 games[key]["neutral"] = True
-
     rows = []
     for g in games.values():
         hs, as_ = g["home_subdivision"], g["away_subdivision"]
@@ -1056,12 +1191,12 @@ def _dedupe_scraped_games(raw_rows: list[dict], team_by_slug: dict[str, dict]) -
     df = pd.DataFrame(rows)
     if len(df):
         week_sort = pd.to_numeric(df["week"], errors="coerce").fillna(99)
-        df = df.assign(_week_sort=week_sort).sort_values(["_week_sort", "date", "home_team", "away_team"]).drop(columns="_week_sort").reset_index(drop=True)
+        df = df.assign(_week_sort=week_sort).sort_values(["season", "_week_sort", "date", "home_team", "away_team"]).drop(columns="_week_sort").reset_index(drop=True)
     return df
 
 
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
-def scrape_fbschedules_2028() -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
+def scrape_fbschedules_public(years: tuple[int, ...] = tuple(range(2027, 2038))) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
     directory_html = _safe_get(FBSCHEDULES_DIRECTORY)
     soup = BeautifulSoup(directory_html, "html.parser")
     urls = set()
@@ -1071,12 +1206,9 @@ def scrape_fbschedules_2028() -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
         if parsed.netloc.endswith("fbschedules.com") and re.fullmatch(r"/ncaa/[a-z0-9-]+/?", parsed.path):
             urls.add(full.split("?")[0])
     urls = sorted(urls)
-
-    teams = []
-    raw_games = []
-    errors = []
+    teams, raw_games, errors = [], [], []
     with ThreadPoolExecutor(max_workers=4) as pool:
-        future_map = {pool.submit(_scrape_one_team, url): url for url in urls}
+        future_map = {pool.submit(_scrape_one_team, url, years): url for url in urls}
         for future in as_completed(future_map):
             url = future_map[future]
             try:
@@ -1085,91 +1217,163 @@ def scrape_fbschedules_2028() -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
                 raw_games.extend(games)
             except Exception as exc:
                 errors.append(f"{url}: {type(exc).__name__}: {exc}")
-
     teams_df = pd.DataFrame(teams).drop_duplicates(subset=["slug"]).sort_values(["subdivision", "conference", "name"]).reset_index(drop=True)
     team_by_slug = {r["slug"]: r for r in teams}
     games_df = _dedupe_scraped_games(raw_games, team_by_slug)
     return teams_df, games_df, errors
 
 
-def build_real_2028_store(teams_df: pd.DataFrame, games_df: pd.DataFrame) -> ScheduleStore:
-    teams = [Team(
-        name=str(r["name"]),
-        subdivision=str(r["subdivision"]),
-        conference=str(r["conference"]),
-        is_a4=bool(r["is_a4"]),
-        parity_managed=bool(r["parity_managed"]),
-    ) for _, r in teams_df.iterrows()]
+def build_real_store(teams_df: pd.DataFrame, games_df: pd.DataFrame, season: int) -> ScheduleStore:
+    teams = [Team(name=str(r["name"]), subdivision=str(r["subdivision"]), conference=str(r["conference"]), is_a4=bool(r["is_a4"]), parity_managed=bool(r["parity_managed"])) for _, r in teams_df.iterrows()]
     valid_names = {t.name for t in teams}
     games = []
-    for i, r in games_df.iterrows():
+    season_games = games_df[games_df["season"] == season] if len(games_df) else games_df
+    for i, r in season_games.iterrows():
         week = r.get("week")
         if pd.isna(week):
             continue
         week = int(week)
-        if week < 0 or week > 13:
+        if week < 0 or week > 13 or r["home_team"] not in valid_names or r["away_team"] not in valid_names:
             continue
-        if r["home_team"] not in valid_names or r["away_team"] not in valid_names:
-            continue
-        games.append(Game(
-            game_id=f"real2028_{i+1}", season=2028, week=week,
-            home_team=str(r["home_team"]), away_team=str(r["away_team"]),
-            moveable=True, locked=False,
-            notes="Public-data MVP assumption: treated as moveable until Gridiron supplies true status.",
-        ))
-    # Public-data mode does not know conference dates or school intent. All weeks are candidate
-    # slots; actual conflicts are handled by the game graph. Gridiron will replace these assumptions.
-    slots = [Slot(team=t.name, season=2028, week=w, status="OPEN", location="ANY")
-             for t in teams for w in range(0, 14)]
+        games.append(Game(game_id=f"real{season}_{i+1}", season=season, week=week, home_team=str(r["home_team"]), away_team=str(r["away_team"]), moveable=True, locked=False, notes="Public-data MVP assumption: treated as moveable until Gridiron supplies true status."))
+    slots = [Slot(team=t.name, season=season, week=w, status="OPEN", location="ANY") for t in teams for w in range(0, 14)]
     return ScheduleStore(teams, games, slots, needs=[])
 
-st.set_page_config(page_title="Gridiron Optimizer MVP", page_icon="🏈", layout="wide")
 
+def _html_escape(value: object) -> str:
+    import html
+    return html.escape(str(value) if value is not None else "")
+
+
+def _team_game_for_row(games_df: pd.DataFrame, team: str, season: int, week: int) -> Optional[pd.Series]:
+    if games_df is None or games_df.empty:
+        return None
+    subset = games_df[(games_df["season"] == season) & (pd.to_numeric(games_df["week"], errors="coerce") == week)]
+    subset = subset[(subset["home_team"] == team) | (subset["away_team"] == team)]
+    return None if subset.empty else subset.iloc[0]
+
+
+def _opponent_view(game: pd.Series, team: str) -> tuple[str, str, str]:
+    neutral = bool(game.get("neutral", False))
+    if str(game["home_team"]) == team:
+        return str(game["away_team"]), str(game.get("away_logo", "") or ""), "N" if neutral else "H"
+    return str(game["home_team"]), str(game.get("home_logo", "") or ""), "N" if neutral else "A"
+
+
+def _logo_html(logo: str, opponent: str, size: int = 34) -> str:
+    initials = "".join(x[0] for x in re.findall(r"[A-Za-z0-9]+", opponent)[:2]).upper() or "?"
+    if logo and logo.lower() != "nan":
+        return (f'<img src="{_html_escape(logo)}" alt="{_html_escape(opponent)} logo" style="width:{size}px;height:{size}px;object-fit:contain;display:block;margin:0 auto 3px;" onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'flex\';">'
+                f'<span style="display:none;width:{size}px;height:{size}px;border:1px solid #aaa;border-radius:50%;align-items:center;justify-content:center;margin:0 auto 3px;font-size:11px;font-weight:700;">{initials}</span>')
+    return f'<span style="display:flex;width:{size}px;height:{size}px;border:1px solid #aaa;border-radius:50%;align-items:center;justify-content:center;margin:0 auto 3px;font-size:11px;font-weight:700;">{initials}</span>'
+
+
+def render_conference_calendar(games_df: pd.DataFrame, teams_df: pd.DataFrame, season: int, conference: str) -> None:
+    members = sorted(teams_df[(teams_df["subdivision"] == "FBS") & (teams_df["conference"] == conference)]["name"].tolist())
+    if not members:
+        st.info("No FBS schools found for that conference in the current public snapshot.")
+        return
+    headers = [f'<th><div>W{w}</div><small>{_week_saturday(season,w).strftime("%b %d").replace(" 0"," ")}</small></th>' for w in range(14)]
+    rows_html = []
+    team_logo_map = {str(r["name"]): str(r.get("logo_url", "") or "") for _, r in teams_df.iterrows()}
+    for team in members:
+        cells = []
+        for week in range(14):
+            game = _team_game_for_row(games_df, team, season, week)
+            if game is None:
+                cells.append('<td class="empty">—</td>')
+            else:
+                opp, logo, site = _opponent_view(game, team)
+                short = opp if len(opp) <= 14 else opp[:12] + "…"
+                game_date = str(game.get("date", "") or "")
+                if game_date and game_date != "TBA":
+                    try: game_date = datetime.strptime(game_date, "%Y-%m-%d").strftime("%b %d").replace(" 0", " ")
+                    except Exception: pass
+                cells.append('<td class="game">' + _logo_html(logo, opp, 32) + f'<div class="opp" title="{_html_escape(opp)}">{_html_escape(short)}</div><div class="site">{site} · {_html_escape(game_date)}</div></td>')
+        row_logo = _logo_html(team_logo_map.get(team, ""), team, 24)
+        rows_html.append(f'<tr><th class="school"><div class="school-line">{row_logo}<span>{_html_escape(team)}</span></div></th>{"".join(cells)}</tr>')
+    style = """<style>
+    .gc-wrap{overflow-x:auto;border:1px solid rgba(128,128,128,.25);border-radius:10px;margin-top:.4rem}
+    .gc{border-collapse:separate;border-spacing:0;min-width:1500px;width:100%;font-size:12px}
+    .gc th,.gc td{border-right:1px solid rgba(128,128,128,.18);border-bottom:1px solid rgba(128,128,128,.18);padding:7px 4px;text-align:center;vertical-align:middle;min-width:86px}
+    .gc thead th{position:sticky;top:0;background:inherit;z-index:2;font-weight:700}.gc .school{position:sticky;left:0;background:inherit;z-index:3;min-width:150px;text-align:left;padding-left:8px;font-size:12px}.gc .school-line{display:flex;align-items:center;gap:6px}.gc .school-line img,.gc .school-line span:first-child{margin:0!important;flex:0 0 auto}
+    .gc td.empty{opacity:.35;font-size:16px}.gc .opp{font-weight:650;line-height:1.1}.gc .site{font-size:10px;opacity:.65;margin-top:2px}
+    </style>"""
+    st.markdown(style + '<div class="gc-wrap"><table class="gc"><thead><tr><th class="school">School</th>' + ''.join(headers) + '</tr></thead><tbody>' + ''.join(rows_html) + '</tbody></table></div>', unsafe_allow_html=True)
+    tba = games_df[(games_df["season"] == season) & (games_df["date"] == "TBA")]
+    tba = tba[(tba["home_team"].isin(members)) | (tba["away_team"].isin(members))]
+    if len(tba):
+        with st.expander(f"TBA non-conference games involving {conference} schools ({len(tba)})"):
+            st.dataframe(tba[["away_team", "home_team", "neutral", "matchup_type"]], use_container_width=True, hide_index=True)
+
+
+def render_team_calendar(games_df: pd.DataFrame, season: int, team: str) -> None:
+    cards = []
+    for week in range(14):
+        sat = _week_saturday(season, week)
+        game = _team_game_for_row(games_df, team, season, week)
+        if game is None:
+            body = '<div class="tc-open">No known non-conf game</div>'
+        else:
+            opp, logo, site = _opponent_view(game, team)
+            site_text = {"H":"HOME","A":"AWAY","N":"NEUTRAL"}[site]
+            date_text = str(game.get("date", ""))
+            if date_text and date_text != "TBA":
+                try: date_text = datetime.strptime(date_text, "%Y-%m-%d").strftime("%b %d").replace(" 0"," ")
+                except Exception: pass
+            body = '<div class="tc-logo">' + _logo_html(logo, opp, 48) + f'</div><div class="tc-opp">{_html_escape(opp)}</div><div class="tc-site">{site_text} · {_html_escape(date_text)}</div>'
+        cards.append(f'<div class="tc-card"><div class="tc-week">WEEK {week}</div><div class="tc-date">{sat.strftime("%b %d").replace(" 0"," ")}</div>{body}</div>')
+    style = """<style>
+    .tc-grid{display:grid;grid-template-columns:repeat(7,minmax(120px,1fr));gap:8px;margin-top:.5rem}.tc-card{border:1px solid rgba(128,128,128,.26);border-radius:10px;padding:10px;min-height:138px;text-align:center}
+    .tc-week{font-size:10px;font-weight:800;letter-spacing:.06em;opacity:.65}.tc-date{font-size:12px;font-weight:700;margin-bottom:8px}.tc-opp{font-size:13px;font-weight:750;line-height:1.15}.tc-site{font-size:10px;opacity:.65;margin-top:4px}.tc-open{font-size:11px;opacity:.38;margin-top:28px}
+    @media(max-width:900px){.tc-grid{grid-template-columns:repeat(4,minmax(115px,1fr))}}@media(max-width:560px){.tc-grid{grid-template-columns:repeat(2,minmax(120px,1fr))}}
+    </style>"""
+    st.markdown(style + '<div class="tc-grid">' + ''.join(cards) + '</div>', unsafe_allow_html=True)
+    tba = games_df[(games_df["season"] == season) & (games_df["date"] == "TBA")]
+    tba = tba[(tba["home_team"] == team) | (tba["away_team"] == team)]
+    if len(tba):
+        st.markdown("**TBA games**")
+        for _, game in tba.iterrows():
+            opp, logo, site = _opponent_view(game, team)
+            cols = st.columns([1, 5])
+            with cols[0]:
+                if logo and logo.lower() != "nan": st.image(logo, width=46)
+            with cols[1]: st.write(f"{opp} · {'Neutral' if site == 'N' else ('Home' if site == 'H' else 'Away')} · Date TBA")
+
+st.set_page_config(page_title="Gridiron Optimizer MVP", page_icon="🏈", layout="wide")
 st.title("🏈 Gridiron Optimizer — MVP")
 st.caption("Chat-first non-conference scheduling. The LLM interprets intent; the deterministic engine validates and solves.")
-
 with st.sidebar:
     st.subheader("Data source")
-    source_mode = st.radio("Choose data", ["Demo", "Real 2028 public snapshot"], index=0)
-    st.caption("Real mode scrapes the public FBSchedules future-opponents pages and caches the result for six hours.")
-
+    source_mode = st.radio("Choose data", ["Demo", "Real public schedule data"], index=0)
+    st.caption("Real mode reads public FBSchedules future-opponents pages and caches the result for six hours.")
 real_teams_df = None
 real_games_df = None
 scrape_errors = []
-
-if source_mode == "Real 2028 public snapshot":
-    st.warning(
-        "Public-data test mode: FBSchedules future schedules are tentative. The optimizer treats known non-conference "
-        "games as moveable and dates without a known non-conference game as candidate slots. It does NOT know a school's "
-        "actual Gridiron availability/need status yet."
-    )
-    st.info(
-        "Use this for MVP testing, not as a production data feed. FBSchedules states that its schedule data is compiled "
-        "from public sources and asks users not to republish its schedules. A production Gridiron integration should use "
-        "Gridiron's own data or licensed/official school and conference sources."
-    )
-    with st.spinner("Loading 2028 FBS/FCS public scheduling snapshot — first load can take 1–3 minutes..."):
-        try:
-            real_teams_df, real_games_df, scrape_errors = scrape_fbschedules_2028()
+if source_mode == "Real public schedule data":
+    st.warning("Public-data test mode: future schedules are tentative. The optimizer treats known non-conference games as moveable and blank dates as candidate slots. It does NOT know a school's actual Gridiron availability/need status yet.")
+    with st.spinner("Loading FBS/FCS public scheduling snapshot — first load can take 1–3 minutes..."):
+        try: real_teams_df, real_games_df, scrape_errors = scrape_fbschedules_public()
         except Exception as exc:
             st.error(f"The live scrape failed: {type(exc).__name__}: {exc}")
-            st.caption("Switch back to Demo mode while we troubleshoot the public site connection.")
             st.stop()
     if real_teams_df is None or real_teams_df.empty:
         st.error("No team data was returned from the public scrape.")
         st.stop()
-    store = build_real_2028_store(real_teams_df, real_games_df)
-    season = 2028
+    available_years = sorted(int(y) for y in real_games_df["season"].dropna().unique()) if len(real_games_df) else list(range(2027, 2038))
     with st.sidebar:
-        st.success(f"Loaded {len(real_teams_df):,} teams / {len(real_games_df):,} unique 2028 commitments")
-        if scrape_errors:
-            st.warning(f"{len(scrape_errors)} team page(s) could not be read")
+        default_idx = available_years.index(2028) if 2028 in available_years else 0
+        season = st.selectbox("Active season", available_years, index=default_idx)
+    store = build_real_store(real_teams_df, real_games_df, season)
+    with st.sidebar:
+        year_games = real_games_df[real_games_df["season"] == season]
+        st.success(f"Loaded {len(real_teams_df):,} teams / {len(year_games):,} unique {season} commitments")
+        if scrape_errors: st.warning(f"{len(scrape_errors)} team page(s) could not be read")
 else:
     store = build_demo_store()
     with st.sidebar:
         season = st.selectbox("Active season", sorted({g.season for g in store.games.values()}), index=0)
         st.caption("Demo data is synthetic and designed around the Georgia–McNeese–Tarleton use case.")
-
 optimizer = NonConferenceOptimizer(store)
 
 with st.sidebar:
@@ -1180,6 +1384,7 @@ with st.sidebar:
 - Protect FBS conference weekly parity
 - Find public FCS availability candidates
 - Find public A4-vs-A4 availability candidates
+- Conference and team calendar views with opponent logos
 - No contract amendment generation
     """)
 
@@ -1220,14 +1425,14 @@ def render_solution(sol, idx: int):
                 st.dataframe(pd.DataFrame(changed), use_container_width=True, hide_index=True)
 
 
-tab_chat, tab_health, tab_schedule, tab_needs = st.tabs(["Ask Gridiron", "Conference Parity", "Schedule Data", "Open Candidates"])
+tab_chat, tab_calendar, tab_health, tab_schedule, tab_needs = st.tabs(["Ask Gridiron", "Calendars", "Conference Parity", "Schedule Data", "Open Candidates"])
 
 with tab_chat:
     st.markdown("### What are you trying to accomplish?")
     if source_mode == "Demo":
         st.caption("Try: “In 2027 the SEC is odd in Week 2. Move Georgia vs McNeese to Week 2 and figure out where to put Tarleton without creating a new FBS parity problem.”")
     else:
-        st.caption("Try a real 2028 matchup from Schedule Data, or ask: “Which FBS conferences are odd in Week 2?” / “Find Alabama an FCS candidate in Week 4.”")
+        st.caption(f"Try a real {season} matchup from Schedule Data, or ask: ‘Get the SEC even in Week 2’ / ‘Find Alabama an FCS candidate in Week 4.’")
 
     if "messages" not in st.session_state:
         st.session_state.messages = []
@@ -1251,7 +1456,11 @@ with tab_chat:
             with st.expander("Interpreted scheduling request"):
                 st.json(intent.__dict__)
 
-            solutions = optimizer.solve(intent)
+            started = time.perf_counter()
+            with st.spinner(f"Searching the {intent.season} schedule graph for the best feasible options..."):
+                solutions = optimizer.solve(intent)
+            elapsed = time.perf_counter() - started
+            st.caption(f"Optimizer search completed in {elapsed:.2f} seconds.")
             if not solutions:
                 st.error("I couldn't find a feasible solution in the current scheduling data. In real-data mode, remember that TBA games have no week assignment and Gridiron-specific availability/needs are not yet loaded.")
             else:
@@ -1261,6 +1470,33 @@ with tab_chat:
                     st.success(f"Found {len(solutions)} match/solution{'s' if len(solutions) != 1 else ''}.")
                 for i, sol in enumerate(solutions, start=1):
                     render_solution(sol, i)
+
+with tab_calendar:
+    st.markdown("### Non-conference calendar")
+    st.caption("Opponent logo is shown on the week/date of the known non-conference game. H = home, A = away, N = neutral. Blank cells mean no known dated non-conference game in the public snapshot.")
+    if source_mode == "Real public schedule data":
+        view_mode = st.radio("Calendar view", ["Conference", "Team"], horizontal=True)
+        if view_mode == "Conference":
+            conferences = sorted(real_teams_df[(real_teams_df["subdivision"] == "FBS") & (real_teams_df["conference"] != "Unknown")]["conference"].dropna().unique())
+            default_conf = conferences.index("SEC") if "SEC" in conferences else 0
+            conference = st.selectbox("Conference", conferences, index=default_conf)
+            st.markdown(f"#### {conference} · {season}")
+            render_conference_calendar(real_games_df, real_teams_df, season, conference)
+        else:
+            team_names = sorted(real_teams_df["name"].dropna().unique())
+            default_team = team_names.index("Georgia") if "Georgia" in team_names else 0
+            team = st.selectbox("Team", team_names, index=default_team)
+            team_meta = real_teams_df[real_teams_df["name"] == team].iloc[0]
+            top = st.columns([1, 7])
+            with top[0]:
+                logo = str(team_meta.get("logo_url", "") or "")
+                if logo and logo.lower() != "nan": st.image(logo, width=70)
+            with top[1]:
+                st.markdown(f"#### {team} · {season}")
+                st.caption(f"{team_meta['conference']} · {team_meta['subdivision']}")
+            render_team_calendar(real_games_df, season, team)
+    else:
+        st.info("Calendar/logo view is enabled for the real public scheduling dataset. Switch Data source to Real public schedule data.")
 
 with tab_health:
     st.markdown("### FBS conference parity by week")
@@ -1272,11 +1508,12 @@ with tab_health:
 
 with tab_schedule:
     st.markdown("### Non-conference games")
-    if source_mode == "Real 2028 public snapshot":
+    if source_mode == "Real public schedule data":
         display_cols = ["date", "week", "away_team", "home_team", "neutral", "matchup_type", "away_conference", "home_conference", "source_urls"]
-        st.dataframe(real_games_df[display_cols], use_container_width=True, hide_index=True)
-        csv_bytes = real_games_df.to_csv(index=False).encode("utf-8")
-        st.download_button("Download 2028 public snapshot CSV", csv_bytes, "gridiron_2028_public_snapshot.csv", "text/csv")
+        year_df = real_games_df[real_games_df["season"] == season]
+        st.dataframe(year_df[display_cols], use_container_width=True, hide_index=True)
+        csv_bytes = year_df.to_csv(index=False).encode("utf-8")
+        st.download_button(f"Download {season} public snapshot CSV", csv_bytes, f"gridiron_{season}_public_snapshot.csv", "text/csv")
         if scrape_errors:
             with st.expander(f"Scrape warnings ({len(scrape_errors)})"):
                 st.code("\n".join(scrape_errors[:100]))
@@ -1288,14 +1525,14 @@ with tab_schedule:
         st.dataframe(slots_df[slots_df["season"] == season].sort_values(["team", "week"]), use_container_width=True, hide_index=True)
 
 with tab_needs:
-    if source_mode == "Real 2028 public snapshot":
+    if source_mode == "Real public schedule data":
         st.markdown("### Public availability candidates")
         st.write("This scrape cannot tell us who *wants* a game. It can only show who has no known dated non-conference commitment in a week. Gridiron's intent/need data is the missing production layer.")
         candidate_week = st.selectbox("Week", list(range(0, 14)), index=2)
         base_games = store.copy_games()
         rows = []
         for team in store.teams.values():
-            occupied = store.game_for_team_week(base_games, team.name, 2028, candidate_week) is not None
+            occupied = store.game_for_team_week(base_games, team.name, season, candidate_week) is not None
             if not occupied:
                 rows.append({"Team": team.name, "Subdivision": team.subdivision, "Conference": team.conference, "A4": team.is_a4})
         st.dataframe(pd.DataFrame(rows).sort_values(["Subdivision", "Conference", "Team"]), use_container_width=True, hide_index=True)
