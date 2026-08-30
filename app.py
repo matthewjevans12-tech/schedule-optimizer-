@@ -2214,6 +2214,164 @@ def _render_move_outcome(kind: str, title: str, body: str, detail: str = "") -> 
     )
 
 
+def render_conference_drag_board(
+    store: ScheduleStore,
+    optimizer: AdvancedNonConferenceOptimizer,
+    teams_df: pd.DataFrame,
+    season: int,
+    conference: str,
+) -> None:
+    """Direct-manipulation conference move board.
+
+    All known non-conference games involving the selected FBS conference are
+    placed directly in Week 0-13 containers. The user drags the actual game
+    card across weeks; clean moves are accepted into the what-if workspace,
+    while blocked moves snap back and trigger the minimum-change CP-SAT repair.
+    """
+    members = set(
+        teams_df[(teams_df["subdivision"] == "FBS") & (teams_df["conference"] == conference)]["name"]
+        .dropna().astype(str).tolist()
+    )
+    if not members:
+        st.info("No FBS schools found for that conference in the current snapshot.")
+        return
+
+    feedback_key = f"conference_drag_feedback_{season}_{conference}"
+    feedback = st.session_state.pop(feedback_key, None)
+    if feedback:
+        _render_move_outcome(
+            feedback.get("kind", "info"),
+            feedback.get("title", "Move evaluated"),
+            feedback.get("body", ""),
+            feedback.get("detail", ""),
+        )
+        sols = feedback.get("solutions") or []
+        if sols:
+            st.markdown('<div class="section-kicker">MINIMUM-CHANGE PATH</div>', unsafe_allow_html=True)
+            render_solution(sols[0], 1)
+
+    st.markdown(
+        '<div class="board-header"><div>'
+        '<div class="section-kicker" style="margin-top:0">INTERACTIVE CONFERENCE BOARD</div>'
+        f'<div class="section-title" style="font-size:1.05rem">{_html_escape(conference)} · drag a game directly to another week</div>'
+        '<div class="section-copy" style="margin-bottom:0">Every card below is a known non-conference game involving this conference. Drop a card on the week you want. A clean move is accepted immediately; a conflict is rejected and the optimizer returns the fewest secondary changes required.</div>'
+        '</div><div class="board-legend"><span class="legend-dot legend-current"></span>Current <span class="legend-dot legend-clean"></span>Accepted <span class="legend-dot legend-conflict"></span>Blocked</div></div>',
+        unsafe_allow_html=True,
+    )
+
+    if not SORTABLES_AVAILABLE:
+        st.info("Direct drag-and-drop requires streamlit-sortables. Your deployment requirements include it; if this message appears, redeploy requirements.txt.")
+        return
+
+    games = []
+    for g in store.games.values():
+        if int(g.season) != int(season):
+            continue
+        if g.home_team in members or g.away_team in members:
+            games.append(g)
+    games.sort(key=lambda g: (int(g.week), g.home_team, g.away_team))
+    if not games:
+        st.info("No dated non-conference games are loaded for this conference.")
+        return
+
+    def conference_side(g: Game) -> tuple[str, str, str]:
+        h = g.home_team in members
+        a = g.away_team in members
+        if h and not a:
+            return g.home_team, g.away_team, "H"
+        if a and not h:
+            return g.away_team, g.home_team, "A"
+        # Defensive fallback for unusual same-conference rows in source data.
+        return g.home_team, g.away_team, "N"
+
+    token_to_game: Dict[str, Game] = {}
+    containers = []
+    for week in range(14):
+        sat = _week_saturday(season, week).strftime("%b %d").replace(" 0", " ")
+        items = []
+        for g in games:
+            if int(g.week) != week:
+                continue
+            school, opp, site = conference_side(g)
+            token = f"{school} — {opp} ({site})"
+            if token in token_to_game:
+                token = f"{token} · {g.game_id[-4:]}"
+            token_to_game[token] = g
+            items.append(token)
+        containers.append({"header": f"W{week} · {sat}", "items": items})
+
+    css = [
+        ".sortable-component{display:grid!important;grid-template-columns:repeat(7,minmax(138px,1fr));gap:8px;background:transparent!important;padding:2px!important}",
+        ".sortable-container{min-height:126px!important;background:#0a1624!important;border:1px solid #263a53!important;border-radius:12px!important;overflow:hidden!important;transition:border-color .15s ease,background .15s ease,box-shadow .15s ease!important}",
+        ".sortable-container-header{font-size:10px!important;font-weight:850!important;color:#9aabc0!important;background:#0f1e30!important;padding:9px 9px!important;border-bottom:1px solid #263a53!important}",
+        ".sortable-container-body{min-height:84px!important;padding:7px!important}",
+        ".sortable-item{font-size:10px!important;line-height:1.25!important;background:linear-gradient(180deg,#19304a,#13263b)!important;color:#f4f7fb!important;border:1px solid #476887!important;border-radius:9px!important;padding:9px!important;cursor:grab!important;box-shadow:0 4px 14px rgba(0,0,0,.16)!important;font-weight:760!important;margin-bottom:6px!important;touch-action:none!important;user-select:none!important;-webkit-user-select:none!important}",
+        ".sortable-item:active{cursor:grabbing!important;transform:scale(1.015)!important}",
+        ".sortable-ghost{opacity:.42!important;border-color:#70a6ff!important;background:#18345a!important}",
+        ".sortable-chosen{border-color:#78adff!important;box-shadow:0 0 0 2px rgba(79,140,255,.18)!important}",
+        ".sortable-container:has(.sortable-ghost){border-color:#4f8cff!important;background:#10243c!important;box-shadow:inset 0 0 0 1px rgba(79,140,255,.18)!important}",
+    ]
+
+    nonce = st.session_state.get(f"conference_board_nonce_{season}_{conference}", 0)
+    sorted_containers = sort_items(
+        containers,
+        multi_containers=True,
+        direction="horizontal",
+        custom_style="\n".join(css),
+        key=f"conference_schedule_{season}_{conference}_{nonce}",
+    )
+
+    new_week_by_token: Dict[str, int] = {}
+    for week, container in enumerate(sorted_containers or []):
+        for token in container.get("items", []):
+            new_week_by_token[str(token)] = int(week)
+
+    moved = []
+    for token, g in token_to_game.items():
+        target_week = new_week_by_token.get(token, int(g.week))
+        if int(target_week) != int(g.week):
+            moved.append((token, g, int(target_week)))
+
+    if moved:
+        # Evaluate one deliberate drop, then immediately rerun so the board
+        # rebuilds from the authoritative what-if workspace.
+        _, game, target_week = moved[0]
+        assessment = _direct_move_assessment(store, game, target_week)
+        if assessment.get("clean"):
+            old_week = int(game.week)
+            _set_workspace_move(season, game.game_id, target_week)
+            st.session_state[feedback_key] = {
+                "kind": "success",
+                "title": "Move accepted",
+                "body": f"{game.away_team} @ {game.home_team}: Week {old_week} → Week {target_week}",
+                "detail": "Both teams are clear in the target week. No secondary schedule move is required.",
+            }
+            st.session_state[f"conference_board_nonce_{season}_{conference}"] = nonce + 1
+            st.rerun()
+        else:
+            solutions = optimizer.solve(Intent(
+                action="MOVE_GAME",
+                season=season,
+                target_week=target_week,
+                team_a=game.home_team,
+                team_b=game.away_team,
+                preserve_fbs_conference_parity=False,
+                max_additional_moves=8,
+                summary="Direct conference-board conflict repair",
+            ))
+            st.session_state[feedback_key] = {
+                "kind": "conflict",
+                "title": "Move blocked",
+                "body": f"{game.away_team} @ {game.home_team} cannot move directly to Week {target_week}.",
+                "detail": str(assessment.get("message", "A scheduling conflict exists.")),
+                "solutions": solutions,
+            }
+            st.session_state[f"conference_board_nonce_{season}_{conference}"] = nonce + 1
+            st.rerun()
+
+    st.caption("Drag the game card itself — not the logo. Clean drops become part of your current what-if workspace; blocked drops return the optimized repair path. The logo matrix below updates after accepted moves.")
+
+
 def render_drag_move_lab(
     store: ScheduleStore,
     optimizer: AdvancedNonConferenceOptimizer,
@@ -2853,7 +3011,7 @@ with tab_chat:
                     render_solution(sol, i)
 
 with tab_calendar:
-    st.markdown('<div class="section-kicker">SCHEDULE BOARD</div><div class="section-title">See the season. Test the move.</div><div class="section-copy">Opponent logos sit on the actual game week. H = home, A = away, N = neutral. Empty cells are not confirmed open dates — they are simply dates with no known public commitment.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-kicker">SCHEDULE BOARD</div><div class="section-title">See the season. Test the move.</div><div class="section-copy">Conference mode now includes a direct-manipulation Week 0–13 board: drag any game card straight to the week you want. The logo matrix below remains the team-by-week visual reference. H = home, A = away, N = neutral.</div>', unsafe_allow_html=True)
     if source_mode != "Real public schedule data":
         st.info("Calendar view uses the real public scheduling dataset. Switch the data source above to Real public schedule data.")
     else:
@@ -2866,12 +3024,9 @@ with tab_calendar:
             with c2:
                 conference = st.selectbox("Conference", conferences, index=default_conf)
             st.markdown(f'<div class="section-kicker">{_html_escape(conference)} · {season}</div>', unsafe_allow_html=True)
+            render_conference_drag_board(store, optimizer, real_teams_df, season, conference)
+            st.markdown('<div class="section-kicker" style="margin-top:1rem">TEAM-BY-WEEK MATRIX</div>', unsafe_allow_html=True)
             render_conference_calendar(year_games, real_teams_df, season, conference)
-            conference_teams = sorted(real_teams_df[(real_teams_df["subdivision"] == "FBS") & (real_teams_df["conference"] == conference)]["name"].dropna().unique())
-            if conference_teams:
-                st.markdown('<div class="section-kicker">EDIT SCHEDULE</div>', unsafe_allow_html=True)
-                edit_team = st.selectbox("Choose a school to drag a game", conference_teams, key=f"conf_edit_team_{season}_{conference}")
-                render_drag_move_lab(store, optimizer, season, edit_team)
         else:
             team_names = sorted(real_teams_df["name"].dropna().unique())
             default_team = team_names.index("Georgia") if "Georgia" in team_names else 0
