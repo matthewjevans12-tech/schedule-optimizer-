@@ -898,14 +898,28 @@ class AdvancedNonConferenceOptimizer(NonConferenceOptimizer):
             model.Add(sum(changed_vars) <= 30)
 
         objective_terms = []
-        # National/multi-week requests heavily prioritize the exact scope the
-        # administrator named, while still discouraging parity problems elsewhere.
-        scoped_bad_vars = [v for k, v in parity_bad.items() if k in scope_keys]
-        if mode == "national" and scoped_bad_vars:
-            objective_terms.append((self.PARITY_PENALTY * 5) * sum(scoped_bad_vars))
-        objective_terms.append(self.PARITY_PENALTY * sum(parity_bad.values()))
-        objective_terms.append(self.MOVE_PENALTY * sum(changed_vars))
-        objective_terms.append(self.DISTANCE_PENALTY * sum(distance_terms))
+        # Direct administrator-requested moves use a strict minimal-intervention
+        # objective. The requested move is already a hard constraint above; once
+        # that move is made, CP-SAT should leave every unrelated game alone.
+        # Existing national parity problems are NOT an invitation to improve the
+        # rest of the schedule during a simple move request. Hard constraints still
+        # prevent the requested move from creating a brand-new parity problem in a
+        # conference/week that was healthy before the move.
+        if mode == "move":
+            # One extra moved game must always cost more than any plausible total
+            # week-distance savings. This gives us lexicographic behavior:
+            #   1) fewest changed games, then 2) shortest cascade.
+            objective_terms.append(1_000_000 * sum(changed_vars))
+            objective_terms.append(100 * sum(distance_terms))
+        else:
+            # National/multi-week requests heavily prioritize the exact scope the
+            # administrator named, while still discouraging parity problems elsewhere.
+            scoped_bad_vars = [v for k, v in parity_bad.items() if k in scope_keys]
+            if mode == "national" and scoped_bad_vars:
+                objective_terms.append((self.PARITY_PENALTY * 5) * sum(scoped_bad_vars))
+            objective_terms.append(self.PARITY_PENALTY * sum(parity_bad.values()))
+            objective_terms.append(self.MOVE_PENALTY * sum(changed_vars))
+            objective_terms.append(self.DISTANCE_PENALTY * sum(distance_terms))
 
         if mode == "fcs_balance":
             fcs_games = [g for g in season_games if self._is_fbs_fcs(g)]
@@ -984,33 +998,59 @@ class AdvancedNonConferenceOptimizer(NonConferenceOptimizer):
             "controlled_balance": "Controlled-game distribution optimized",
         }.get(mode, "Schedule optimized")
         distance = sum(abs(m.to_week - m.from_week) for m in moves)
-        score = max(0.0, min(100.0, 100.0 - 5.5 * len(moves) - 0.8 * distance - 4.0 * after_bad_count + 4.0 * max(0, before_bad_count - after_bad_count)))
         warnings = []
-        if after_bad_count:
-            warnings.append(f"{after_bad_count} FBS conference/week parity issue(s) remain nationally after this optimization.")
-        if status == cp_model.FEASIBLE:
-            warnings.append("The solver found a high-quality feasible solution within the time limit; it did not prove global optimality.")
-        if mode == "national":
-            conf_scope = "all FBS conferences" if intent.all_conferences or (not intent.conference and not intent.conferences) else ", ".join(scope_conferences)
-            week_scope = ", ".join(f"W{w}" for w in scope_weeks)
-            scope_sentence = (
-                f"Within the requested scope ({conf_scope}; {week_scope}), odd conference/week slots changed "
-                f"from {scope_before_bad} to {scope_after_bad}. "
-            )
+
+        if mode == "move" and target_game is not None:
+            requested_distance = abs(int(intent.target_week) - int(target_game.week))
+            additional_moves = max(0, len(moves) - 1)
+            cascade_distance = max(0, distance - requested_distance)
+            score = max(0.0, min(100.0, 100.0 - 15.0 * additional_moves - 0.8 * cascade_distance))
+            target_label = f"{target_game.away_team} @ {target_game.home_team}"
+            if additional_moves == 0:
+                explanation = (
+                    f"Minimal-change solution with {self.engine_name}: move {target_label} from Week {target_game.week} "
+                    f"to Week {int(intent.target_week)}. Both teams are available, so no other game needs to move. "
+                    f"Unrelated national parity issues were intentionally left untouched. "
+                    f"Solver status: {self.last_solver_status} in {self.last_solver_seconds:.2f}s."
+                )
+            else:
+                explanation = (
+                    f"Minimal-change solution with {self.engine_name}: move {target_label} from Week {target_game.week} "
+                    f"to Week {int(intent.target_week)} and make {additional_moves} additional move(s) required to resolve "
+                    f"a direct team/week or newly-created parity conflict. Unrelated schedule issues were left untouched. "
+                    f"Solver status: {self.last_solver_status} in {self.last_solver_seconds:.2f}s."
+                )
+            if status == cp_model.FEASIBLE:
+                warnings.append("The solver found a feasible minimal-change solution within the time limit; it did not prove global optimality.")
+            result_title = "Minimal-change solution"
         else:
-            scope_sentence = ""
-        explanation = (
-            f"{mode_label} with {self.engine_name}. The solver evaluated the feasible game/week graph, "
-            f"moved {len(moves)} game(s), and changed national parity issues from {before_bad_count} to {after_bad_count}. "
-            f"{scope_sentence}Solver status: {self.last_solver_status} in {self.last_solver_seconds:.2f}s."
-        )
-        if mode == "national" and scope_after_bad > 0:
-            warnings.append(
-                f"{scope_after_bad} requested conference/week parity issue(s) remain. This is the best solution found "
-                f"within the current move limits and public-data assumptions."
+            score = max(0.0, min(100.0, 100.0 - 5.5 * len(moves) - 0.8 * distance - 4.0 * after_bad_count + 4.0 * max(0, before_bad_count - after_bad_count)))
+            if after_bad_count:
+                warnings.append(f"{after_bad_count} FBS conference/week parity issue(s) remain nationally after this optimization.")
+            if status == cp_model.FEASIBLE:
+                warnings.append("The solver found a high-quality feasible solution within the time limit; it did not prove global optimality.")
+            if mode == "national":
+                conf_scope = "all FBS conferences" if intent.all_conferences or (not intent.conference and not intent.conferences) else ", ".join(scope_conferences)
+                week_scope = ", ".join(f"W{w}" for w in scope_weeks)
+                scope_sentence = (
+                    f"Within the requested scope ({conf_scope}; {week_scope}), odd conference/week slots changed "
+                    f"from {scope_before_bad} to {scope_after_bad}. "
+                )
+            else:
+                scope_sentence = ""
+            explanation = (
+                f"{mode_label} with {self.engine_name}. The solver evaluated the feasible game/week graph, "
+                f"moved {len(moves)} game(s), and changed national parity issues from {before_bad_count} to {after_bad_count}. "
+                f"{scope_sentence}Solver status: {self.last_solver_status} in {self.last_solver_seconds:.2f}s."
             )
+            if mode == "national" and scope_after_bad > 0:
+                warnings.append(
+                    f"{scope_after_bad} requested conference/week parity issue(s) remain. This is the best solution found "
+                    f"within the current move limits and public-data assumptions."
+                )
+            result_title = "Recommended optimization"
         return [Solution(
-            title="Recommended optimization",
+            title=result_title,
             moves=sorted(moves, key=lambda m: (m.from_week, m.home_team, m.away_team)),
             score=round(score, 1),
             parity_before=parity_before,
@@ -1188,7 +1228,7 @@ Definitions:
 - BALANCE_FCS_GAMES: user wants to improve or balance the number of FBS-vs-FCS games by week.
 - BALANCE_CONTROLLED_GAMES: user wants to balance a conference's weekly non-conference/controlled-game inventory.
 - OPTIMIZE_MARKET: user asks to optimize or match the overall market / teams-needing-games report.
-For a request like 'The SEC is odd in week 2 and I need to move Georgia vs McNeese to week 2 ...', use MOVE_GAME, conference SEC, team_a Georgia, team_b McNeese, target_week 2, and preserve parity true.
+For a request like 'The SEC is odd in week 2 and I need to move Georgia vs McNeese to week 2 ...', use MOVE_GAME, conference SEC, team_a Georgia, team_b McNeese, target_week 2. Set preserve_fbs_conference_parity true only when the user explicitly asks to avoid creating a new parity problem, keep a conference even, or otherwise preserve parity. For a simple direct move with no parity instruction, set it false so unrelated conference issues are not optimized or repaired.
 For every explicitly named week, populate target_weeks. If exactly one week is named, also populate target_week; if multiple weeks are named, target_week should be null.
 For every explicitly named conference, populate conferences. If exactly one conference is named, also populate conference. If the user says all/every conferences, set all_conferences true, conferences empty, conference null.
 If the year is omitted, season should be null rather than guessed. Never invent teams, dates, guarantee amounts, or constraints.
@@ -1316,6 +1356,11 @@ def parse_locally(text: str, team_names: Iterable[str]) -> Intent:
         team_a, team_b = (found + [None, None])[:2]
         opponent_class = "ANY"
 
+    explicit_parity_protection = bool(re.search(
+        r"(?:without|avoid|don't|do not|preserve|keep).{0,40}(?:parity|odd|even)|(?:parity|odd|even).{0,40}(?:problem|issue|preserve|keep)",
+        lower,
+    ))
+
     return Intent(
         action=action,
         season=season,
@@ -1326,7 +1371,7 @@ def parse_locally(text: str, team_names: Iterable[str]) -> Intent:
         all_conferences=all_conferences,
         team_a=team_a,
         team_b=team_b,
-        preserve_fbs_conference_parity=True,
+        preserve_fbs_conference_parity=(explicit_parity_protection if action == "MOVE_GAME" else True),
         max_additional_moves=4,
         opponent_class=opponent_class,
         location="HOME" if "home" in lower else "ANY",
@@ -2389,7 +2434,7 @@ with tab_opt:
         _run_and_render(Intent(action="MAKE_CONFERENCE_EVEN", season=season, target_week=week, conference=conf, max_additional_moves=6, summary="Optimization Center odd/even"), "run_parity")
 
     elif report == "Scheduled Games / Move Repair":
-        st.markdown('<div class="section-kicker">SCHEDULED GAMES</div><div class="section-copy">Choose a known non-conference game and force it into a new week. CP-SAT relocates any displaced games simultaneously and minimizes the full ripple effect.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-kicker">SCHEDULED GAMES</div><div class="section-copy">Choose a known non-conference game and force it into a new week. Gridiron first attempts the requested move only. It relocates other games only when they are directly displaced or when you explicitly ask to preserve conference parity.</div>', unsafe_allow_html=True)
         season_games = sorted([g for g in store.games.values() if g.season == season], key=lambda g: (g.week, g.home_team, g.away_team))
         if not season_games:
             st.info("No dated games are loaded for this season.")
@@ -2398,7 +2443,7 @@ with tab_opt:
             game_label = st.selectbox("Game", list(labels), key="opt_move_game")
             target_week = st.selectbox("Move to week", list(range(0, 14)), index=min(13, labels[game_label].week + 1), key="opt_move_week")
             g = labels[game_label]
-            _run_and_render(Intent(action="MOVE_GAME", season=season, target_week=target_week, team_a=g.home_team, team_b=g.away_team, preserve_fbs_conference_parity=True, max_additional_moves=6, summary="Optimization Center scheduled-game repair"), "run_move")
+            _run_and_render(Intent(action="MOVE_GAME", season=season, target_week=target_week, team_a=g.home_team, team_b=g.away_team, preserve_fbs_conference_parity=False, max_additional_moves=6, summary="Optimization Center scheduled-game repair"), "run_move")
 
     elif report == "# of Controlled Games":
         st.markdown('<div class="section-kicker">CONTROLLED GAME DISTRIBUTION</div><div class="section-copy">Balance a conference’s weekly non-conference inventory while preserving currently healthy FBS parity. In the public-data prototype this uses known non-conference team appearances as the controlled-inventory proxy.</div>', unsafe_allow_html=True)
