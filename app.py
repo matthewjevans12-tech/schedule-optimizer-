@@ -233,6 +233,56 @@ class NonConferenceOptimizer:
             count += sum(1 for value in parity.values() if value.startswith("ODD"))
         return count
 
+    def parity_issue_details(
+        self,
+        games: Dict[str, Game],
+        season: int,
+        weeks: Iterable[int] = range(0, 14),
+        conferences: Optional[Iterable[str]] = None,
+    ) -> List[Dict[str, object]]:
+        """Return every odd conference/week state with enough context to act on it."""
+        allowed = set(conferences) if conferences is not None else None
+        issues: List[Dict[str, object]] = []
+        for week in sorted({int(w) for w in weeks}):
+            parity = self.conference_parity(games, season, week)
+            for conference, value in sorted(parity.items()):
+                if allowed is not None and conference not in allowed:
+                    continue
+                if not value.startswith("ODD"):
+                    continue
+                members = self.store.conference_members(conference)
+                member_names = {t.name for t in members}
+                nonconf_teams: Set[str] = set()
+                game_labels: List[str] = []
+                for game in games.values():
+                    if game.season != season or game.week != week:
+                        continue
+                    home = self.store.teams.get(game.home_team)
+                    away = self.store.teams.get(game.away_team)
+                    if home and away and home.conference == away.conference and home.subdivision == away.subdivision == "FBS":
+                        continue
+                    involved = False
+                    if game.home_team in member_names:
+                        nonconf_teams.add(game.home_team)
+                        involved = True
+                    if game.away_team in member_names:
+                        nonconf_teams.add(game.away_team)
+                        involved = True
+                    if involved:
+                        game_labels.append(f"{game.away_team} @ {game.home_team}")
+                available = len(members) - len(nonconf_teams)
+                issues.append({
+                    "conference": conference,
+                    "week": week,
+                    "available": available,
+                    "conference_size": len(members),
+                    "nonconf_count": len(nonconf_teams),
+                    "nonconf_teams": sorted(nonconf_teams),
+                    "games": sorted(set(game_labels)),
+                    "next_action": f"Change one {conference} non-conference team appearance into or out of Week {week} to flip parity.",
+                })
+        return issues
+
     def _candidate_weeks(self, game: Game, preferred_week: Optional[int] = None) -> List[int]:
         weeks = list(range(0, 15))
         weeks = [w for w in weeks if w != game.week]
@@ -1078,6 +1128,8 @@ class AdvancedNonConferenceOptimizer(NonConferenceOptimizer):
                 "scope_conferences": scope_conferences,
                 "scope_weeks": scope_weeks,
                 "status_is_optimal": status == cp_model.OPTIMAL,
+                "season": season,
+                "unresolved_issues": self.parity_issue_details(after_games, season, range(0, 14)),
             },
         )]
 
@@ -1928,7 +1980,7 @@ def _logo_html(logo: str, opponent: str, size: int = 42) -> str:
     )
     if logo and str(logo).lower() != "nan":
         return (
-            f'<img src="{_html_escape(logo)}" alt="{_html_escape(opponent)} logo" '
+            f'<img draggable="false" src="{_html_escape(logo)}" alt="{_html_escape(opponent)} logo" '
             f'class="team-logo" style="width:{size}px;height:{size}px" '
             f'onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'flex\';">'
             f'<span class="logo-fallback" style="display:none;width:{size}px;height:{size}px">{initials}</span>'
@@ -2168,20 +2220,26 @@ def render_drag_move_lab(
     season: int,
     selected_team: str,
 ) -> None:
-    """Interactive drag-and-drop move lab for one team's non-conference games.
+    """Direct schedule editor for one team.
 
-    The user selects a game, then drags that single game across week containers.
-    Because only one game is active at a time, each target week can be colored
-    ahead of time: green = clean move, red = direct conflict, blue = current.
-    Invalid drops snap back and trigger the minimal CP-SAT repair path.
+    Every dated non-conference game for the selected team is visible on a
+    fourteen-week rail. The user drags the game itself; there is no separate
+    game selector. Clean drops are accepted into the what-if workspace.
+    Conflicted drops are rejected, snap back, and trigger the minimum-change
+    CP-SAT repair path.
     """
-    st.markdown(
-        '<div class="board-header"><div><div class="section-kicker" style="margin-top:0">INTERACTIVE MOVE LAB</div>'
-        '<div class="section-title" style="font-size:1.05rem">Drag a game to test a new week</div>'
-        '<div class="section-copy" style="margin-bottom:0">Green weeks are clean direct moves. Red weeks are blocked by another known game. A blocked drop snaps back and the optimizer calculates the minimum-change path to make it work.</div>'
-        '</div><div class="board-legend"><span class="legend-dot legend-current"></span>Current <span class="legend-dot legend-clean"></span>Clean <span class="legend-dot legend-conflict"></span>Conflict</div></div>',
-        unsafe_allow_html=True,
-    )
+    feedback = st.session_state.pop(f"move_feedback_{season}", None)
+    if feedback:
+        _render_move_outcome(
+            feedback.get("kind", "info"),
+            feedback.get("title", "Move evaluated"),
+            feedback.get("body", ""),
+            feedback.get("detail", ""),
+        )
+        sols = feedback.get("solutions") or []
+        if sols:
+            st.markdown('<div class="section-kicker">MINIMUM-CHANGE PATH</div>', unsafe_allow_html=True)
+            render_solution(sols[0], 1)
 
     team_games = sorted(
         [g for g in store.games.values() if g.season == season and g.involves(selected_team)],
@@ -2190,96 +2248,116 @@ def render_drag_move_lab(
     if not team_games:
         st.info("No dated non-conference games are loaded for this team.")
         return
-    labels = {f"W{g.week} · {g.away_team} @ {g.home_team}": g for g in team_games}
-    game_label = st.selectbox("Game to move", list(labels), key=f"drag_game_{season}_{selected_team}")
-    game = labels[game_label]
-    assessments = {w: _direct_move_assessment(store, game, w) for w in range(14)}
 
-    # Build one draggable game card across fourteen week containers.
-    token = _sortable_game_token(game)
+    st.markdown(
+        '<div class="board-header"><div><div class="section-kicker" style="margin-top:0">LIVE SCHEDULE EDITOR</div>'
+        f'<div class="section-title" style="font-size:1.05rem">{_html_escape(selected_team)} · drag any game to another week</div>'
+        '<div class="section-copy" style="margin-bottom:0">Drop a game on the week you want. A clean move is accepted immediately. A conflict is rejected and the optimizer returns the fewest secondary moves needed to make that date work.</div>'
+        '</div><div class="board-legend"><span class="legend-dot legend-current"></span>Scheduled <span class="legend-dot legend-clean"></span>Accepted <span class="legend-dot legend-conflict"></span>Blocked</div></div>',
+        unsafe_allow_html=True,
+    )
+
+    if not SORTABLES_AVAILABLE:
+        st.info("Drag-and-drop requires the streamlit-sortables package. The deployment requirements file includes it.")
+        return
+
+    def token_for(game: Game) -> str:
+        opponent = game.away_team if game.home_team == selected_team else game.home_team
+        site = "H" if game.home_team == selected_team else "A"
+        return f"{opponent} · {site}"
+
+    token_to_game: Dict[str, Game] = {}
     containers = []
     for week in range(14):
         sat = _week_saturday(season, week).strftime("%b %d").replace(" 0", " ")
-        containers.append({"header": f"W{week} · {sat}", "items": [token] if week == game.week else []})
+        items = []
+        for game in team_games:
+            if int(game.week) != week:
+                continue
+            token = token_for(game)
+            # Defensive uniqueness for same opponent labels in unusual datasets.
+            if token in token_to_game:
+                token = f"{token} · {game.game_id[-4:]}"
+            token_to_game[token] = game
+            items.append(token)
+        containers.append({"header": f"W{week} · {sat}", "items": items})
 
-    if SORTABLES_AVAILABLE:
-        css = [
-            ".sortable-component{display:grid!important;grid-template-columns:repeat(7,minmax(122px,1fr));gap:8px;background:transparent!important;padding:2px!important}",
-            ".sortable-container{min-height:105px!important;background:#0b1726!important;border:1px solid #25344a!important;border-radius:12px!important;overflow:hidden!important}",
-            ".sortable-container-header{font-size:10px!important;font-weight:800!important;letter-spacing:.02em!important;color:#91a0b4!important;background:#0f1d2d!important;padding:9px 8px!important;border-bottom:1px solid #24334a!important}",
-            ".sortable-container-body{min-height:62px!important;padding:7px!important}",
-            ".sortable-item{font-size:10px!important;line-height:1.25!important;background:#17263a!important;color:#eef3f8!important;border:1px solid #36506f!important;border-radius:9px!important;padding:9px!important;cursor:grab!important;box-shadow:none!important}",
-            ".sortable-item:hover{background:#1b2d45!important}",
-        ]
-        for week in range(14):
-            a = assessments[week]
-            nth = week + 1
-            if week == game.week:
-                css.append(f".sortable-container:nth-child({nth}){{border-color:#4f8cff!important;box-shadow:inset 0 0 0 1px rgba(79,140,255,.18)!important}}")
-                css.append(f".sortable-container:nth-child({nth}) .sortable-container-header{{color:#8ab7ff!important;background:rgba(79,140,255,.10)!important}}")
-            elif a.get("clean"):
-                css.append(f".sortable-container:nth-child({nth}){{border-color:rgba(52,199,133,.48)!important}}")
-                css.append(f".sortable-container:nth-child({nth}) .sortable-container-header{{color:#6ee0ad!important;background:rgba(52,199,133,.08)!important}}")
-            else:
-                css.append(f".sortable-container:nth-child({nth}){{border-color:rgba(239,91,103,.42)!important}}")
-                css.append(f".sortable-container:nth-child({nth}) .sortable-container-header{{color:#ff8c96!important;background:rgba(239,91,103,.08)!important}}")
-        sorted_containers = sort_items(
-            containers,
-            multi_containers=True,
-            direction="horizontal",
-            custom_style="\n".join(css),
-            key=f"move_board_{season}_{game.game_id}_{game.week}_{st.session_state.get(f'move_board_nonce_{season}', 0)}",
-        )
-        target_week = game.week
-        for week, container in enumerate(sorted_containers or []):
-            if token in container.get("items", []):
-                target_week = week
-                break
+    css = [
+        ".sortable-component{display:grid!important;grid-template-columns:repeat(7,minmax(122px,1fr));gap:8px;background:transparent!important;padding:2px!important}",
+        ".sortable-container{min-height:108px!important;background:#0b1726!important;border:1px solid #25344a!important;border-radius:12px!important;overflow:hidden!important;transition:border-color .15s ease,background .15s ease!important}",
+        ".sortable-container-header{font-size:10px!important;font-weight:850!important;letter-spacing:.02em!important;color:#91a0b4!important;background:#0f1d2d!important;padding:9px 8px!important;border-bottom:1px solid #24334a!important}",
+        ".sortable-container-body{min-height:64px!important;padding:7px!important}",
+        ".sortable-item{font-size:10px!important;line-height:1.25!important;background:linear-gradient(180deg,#1a2b42,#142338)!important;color:#eef3f8!important;border:1px solid #44617f!important;border-radius:9px!important;padding:10px 9px!important;cursor:grab!important;box-shadow:0 4px 12px rgba(0,0,0,.13)!important;font-weight:760!important}",
+        ".sortable-item:active{cursor:grabbing!important;transform:scale(1.02)!important}",
+        ".sortable-container:has(.sortable-item){border-color:#416a9a!important;background:#0e1c2c!important}",
+    ]
+
+    nonce = st.session_state.get(f"move_board_nonce_{season}_{selected_team}", 0)
+    sorted_containers = sort_items(
+        containers,
+        multi_containers=True,
+        direction="horizontal",
+        custom_style="\n".join(css),
+        key=f"direct_schedule_{season}_{selected_team}_{nonce}",
+    )
+
+    new_week_by_token: Dict[str, int] = {}
+    for week, container in enumerate(sorted_containers or []):
+        for token in container.get("items", []):
+            new_week_by_token[str(token)] = int(week)
+
+    moved = []
+    for token, game in token_to_game.items():
+        target_week = new_week_by_token.get(token, int(game.week))
         if int(target_week) != int(game.week):
-            assessment = assessments[int(target_week)]
-            if assessment.get("clean"):
-                old_week = int(game.week)
-                _set_workspace_move(season, game.game_id, int(target_week))
-                st.session_state[f"move_feedback_{season}"] = {
-                    "kind": "success",
-                    "title": "Move accepted",
-                    "body": f"{game.away_team} @ {game.home_team} moved from Week {old_week} to Week {int(target_week)}.",
-                    "detail": "Both teams are clear on the target week. No additional game changes are required.",
-                }
-                st.rerun()
-            else:
-                intent = Intent(
-                    action="MOVE_GAME",
-                    season=season,
-                    target_week=int(target_week),
-                    team_a=game.home_team,
-                    team_b=game.away_team,
-                    preserve_fbs_conference_parity=False,
-                    max_additional_moves=8,
-                    summary="Drag-and-drop conflict repair",
-                )
-                solutions = optimizer.solve(intent)
-                st.session_state[f"move_feedback_{season}"] = {
-                    "kind": "conflict",
-                    "title": "Move blocked",
-                    "body": f"{game.away_team} @ {game.home_team} cannot move directly to Week {int(target_week)}.",
-                    "detail": str(assessment.get("message", "A scheduling conflict exists.")),
-                    "solutions": solutions,
-                    "requested_week": int(target_week),
-                    "game_id": game.game_id,
-                }
-                # Force the component to remount in its original position.
-                st.session_state[f"move_board_nonce_{season}"] = st.session_state.get(f"move_board_nonce_{season}", 0) + 1
-                st.rerun()
-    else:
-        st.info("Drag-and-drop requires the streamlit-sortables package. The deployment requirements file in this update includes it.")
+            moved.append((token, game, int(target_week)))
 
-    # Accessible/non-drag alternative.
+    if moved:
+        # Process only the first intentional change; rerun immediately before a
+        # second drag can be interpreted from the same component state.
+        _, game, target_week = moved[0]
+        assessment = _direct_move_assessment(store, game, target_week)
+        if assessment.get("clean"):
+            old_week = int(game.week)
+            _set_workspace_move(season, game.game_id, target_week)
+            st.session_state[f"move_feedback_{season}"] = {
+                "kind": "success",
+                "title": "Move accepted",
+                "body": f"{game.away_team} @ {game.home_team}: Week {old_week} → Week {target_week}",
+                "detail": "Both teams are clear in the target week. No secondary schedule move is required.",
+            }
+            st.session_state[f"move_board_nonce_{season}_{selected_team}"] = nonce + 1
+            st.rerun()
+        else:
+            solutions = optimizer.solve(Intent(
+                action="MOVE_GAME",
+                season=season,
+                target_week=target_week,
+                team_a=game.home_team,
+                team_b=game.away_team,
+                preserve_fbs_conference_parity=False,
+                max_additional_moves=8,
+                summary="Direct calendar drag conflict repair",
+            ))
+            st.session_state[f"move_feedback_{season}"] = {
+                "kind": "conflict",
+                "title": "Move blocked",
+                "body": f"{game.away_team} @ {game.home_team} cannot move directly to Week {target_week}.",
+                "detail": str(assessment.get("message", "A scheduling conflict exists.")),
+                "solutions": solutions,
+            }
+            st.session_state[f"move_board_nonce_{season}_{selected_team}"] = nonce + 1
+            st.rerun()
+
+    st.caption("Tip: the logo calendar above is a read-only overview. Use this live editor to make what-if moves; accepted moves immediately flow back into every calendar and parity report.")
+
     with st.expander("Move with controls instead"):
+        game_labels = {f"W{g.week} · {g.away_team} @ {g.home_team}": g for g in team_games}
+        game_label = st.selectbox("Game", list(game_labels), key=f"manual_game_{season}_{selected_team}")
+        game = game_labels[game_label]
         target = st.selectbox("Target week", list(range(14)), index=int(game.week), key=f"manual_target_{season}_{game.game_id}")
-        a = assessments[int(target)]
-        status = "Clean move" if a.get("clean") else "Conflict"
-        st.caption(f"{status}: {a.get('message', '')}")
+        a = _direct_move_assessment(store, game, int(target))
+        st.caption(("Clean move: " if a.get("clean") else "Conflict: ") + str(a.get("message", "")))
         if st.button("Evaluate move", key=f"manual_eval_{season}_{game.game_id}", use_container_width=True):
             if int(target) == int(game.week):
                 st.info("That game is already in the selected week.")
@@ -2287,8 +2365,8 @@ def render_drag_move_lab(
                 _set_workspace_move(season, game.game_id, int(target))
                 st.session_state[f"move_feedback_{season}"] = {
                     "kind": "success", "title": "Move accepted",
-                    "body": f"{game.away_team} @ {game.home_team} moved to Week {int(target)}.",
-                    "detail": "No direct team/week conflict was found.",
+                    "body": f"{game.away_team} @ {game.home_team}: Week {game.week} → Week {int(target)}",
+                    "detail": "Both teams are clear in the target week. No secondary move is required.",
                 }
                 st.rerun()
             else:
@@ -2299,15 +2377,6 @@ def render_drag_move_lab(
                     "detail": str(a.get("message", "A scheduling conflict exists.")), "solutions": solutions,
                 }
                 st.rerun()
-
-    feedback = st.session_state.pop(f"move_feedback_{season}", None)
-    if feedback:
-        _render_move_outcome(feedback.get("kind", "info"), feedback.get("title", "Move evaluated"), feedback.get("body", ""), feedback.get("detail", ""))
-        sols = feedback.get("solutions") or []
-        if sols:
-            st.markdown('<div class="section-kicker">MINIMUM-CHANGE PATH</div>', unsafe_allow_html=True)
-            render_solution(sols[0], 1)
-
 
 
 st.set_page_config(
@@ -2395,6 +2464,7 @@ footer,#MainMenu{visibility:hidden}
 .gc tr:hover .school,.gc tr:hover td{background-color:#112237}
 .school-line{display:flex;align-items:center;gap:9px;font-size:10px;font-weight:760;color:#edf3f9;white-space:nowrap}
 .team-logo{object-fit:contain;display:block;flex:0 0 auto}
+.team-logo{-webkit-user-drag:none;user-select:none;pointer-events:none}
 .logo-fallback{display:flex;border:1px solid rgba(255,255,255,.14);border-radius:50%;align-items:center;justify-content:center;color:#9fb0c3;font-size:9px;font-weight:820;flex:0 0 auto;background:#14243a}
 .week-label{display:block;color:#fff;font-size:9px;font-weight:860}.week-date{display:block;color:#71849a;font-size:8px;margin-top:2px;font-weight:650}
 .gc td{padding:5px 4px;height:78px;min-width:82px;background:#091522}
@@ -2432,6 +2502,7 @@ footer,#MainMenu{visibility:hidden}
 .result-kpi{padding:10px 13px;border-right:1px solid var(--g-border-soft)}.result-kpi:last-child{border-right:0}.result-kpi-label{font-size:.56rem;color:#677d94;letter-spacing:.11em;font-weight:880}.result-kpi-value{font-size:.82rem;color:#eef4fa;font-weight:810;margin-top:3px}
 .move-table{width:100%;border-collapse:collapse;font-size:.72rem}.move-table th{color:#71869d;font-size:.57rem;letter-spacing:.1em;text-align:left;padding:9px 13px;background:#0b1725}.move-table td{padding:10px 13px;border-top:1px solid var(--g-border-soft);color:#dfe7ef}.move-table td:nth-child(2),.move-table td:nth-child(3){white-space:nowrap}.move-arrow{color:#70869e;padding:0 6px}
 .result-note{display:flex;gap:9px;align-items:flex-start;padding:10px 13px;border-top:1px solid var(--g-border-soft);color:#7f93aa;font-size:.67rem;line-height:1.4}.result-note strong{color:#a8b9ca}
+.issue-summary{display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px solid rgba(239,91,103,.28);background:linear-gradient(90deg,rgba(239,91,103,.07),#0d1a2a 45%);border-radius:12px;padding:11px 13px;margin:9px 0}.issue-summary strong{color:#fff;font-size:.82rem}.issue-summary span{color:#8ea2b8;font-size:.69rem}.issue-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;margin:8px 0}.issue-card{border:1px solid var(--g-border-soft);background:#0a1624;border-radius:10px;padding:9px 10px}.issue-head{display:flex;align-items:center;justify-content:space-between;gap:8px}.issue-key{font-size:.71rem;font-weight:850;color:#eef4fa}.issue-badge{font-size:.58rem;font-weight:900;color:#ff9ba4;border:1px solid rgba(239,91,103,.25);background:rgba(239,91,103,.08);padding:3px 6px;border-radius:999px}.issue-stats{font-size:.64rem;color:#7f93aa;margin-top:5px}.issue-games{font-size:.62rem;color:#aab9c8;margin-top:5px;line-height:1.35}.issue-action{font-size:.61rem;color:#79aaf0;margin-top:6px}@media(max-width:900px){.issue-grid{grid-template-columns:1fr}}
 .parity-impact{padding:11px 13px;border-top:1px solid var(--g-border-soft)}.parity-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;margin-top:7px}.parity-row{display:grid;grid-template-columns:105px 1fr 18px 1fr;align-items:center;gap:7px;border:1px solid var(--g-border-soft);border-radius:9px;background:#0a1624;padding:8px 9px;font-size:.65rem}.parity-key{font-weight:800;color:#bdcad7}.parity-old{color:#8194a9}.parity-new{color:#c8d5e2}.parity-arrow{color:#536a83;text-align:center}
 
 /* Compact pills */
@@ -2620,19 +2691,80 @@ def render_solution(sol, idx: int):
     else:
         _render_move_outcome("success", "No schedule movement required", "The requested condition is already satisfied in the current workspace.")
 
-    # Turn solver warnings into concise operational notes rather than large yellow boxes.
+    # Keep technical solver notes quiet. Remaining parity counts are rendered
+    # below as an inspectable issue register instead of an unexplained warning.
     for warning in sol.warnings:
         warning_text = str(warning)
+        if "remain" in warning_text.lower() and "parity" in warning_text.lower():
+            continue
         if "global optimality" in warning_text.lower():
-            note = "Best solution found within the interactive time limit. The solver did not need to prove global optimality before returning it."
-            kind = "info"
-        elif "remain" in warning_text.lower():
-            note = warning_text
-            kind = "conflict"
+            note = "Best solution found within the interactive time limit. Global optimality was not required before returning the recommendation."
+            with st.expander("Solver details", expanded=False):
+                st.caption(note)
         else:
-            note = warning_text
-            kind = "info"
-        _render_move_outcome(kind, "Solver note", note)
+            _render_move_outcome("info", "Solver note", warning_text)
+
+    unresolved = list(md.get("unresolved_issues") or [])
+    if unresolved:
+        by_conf: Dict[str, int] = {}
+        for issue in unresolved:
+            conf = str(issue.get("conference", "Unknown"))
+            by_conf[conf] = by_conf.get(conf, 0) + 1
+        conf_summary = " · ".join(f"{c} {n}" for c, n in sorted(by_conf.items(), key=lambda x: (-x[1], x[0])))
+        st.markdown(
+            '<div class="issue-summary"><div><strong>' + str(len(unresolved)) + ' unresolved conference/week parity issues</strong><br>'
+            '<span>Every remaining issue is listed below — conference, week, current state and the games creating the non-conference inventory.</span></div>'
+            '<span>' + _html_escape(conf_summary) + '</span></div>',
+            unsafe_allow_html=True,
+        )
+        with st.expander(f"View all {len(unresolved)} unresolved issues", expanded=False):
+            cards = []
+            for issue in unresolved:
+                games = list(issue.get("games") or [])
+                game_text = " · ".join(games[:4]) if games else "No dated non-conference games identified"
+                if len(games) > 4:
+                    game_text += f" · +{len(games)-4} more"
+                cards.append(
+                    '<div class="issue-card">'
+                    '<div class="issue-head"><div class="issue-key">' + _html_escape(issue.get("conference")) + ' · Week ' + _html_escape(issue.get("week")) + '</div><div class="issue-badge">ODD</div></div>'
+                    '<div class="issue-stats">' + _html_escape(issue.get("available")) + ' conference teams available · ' + _html_escape(issue.get("nonconf_count")) + ' teams in non-conference games</div>'
+                    '<div class="issue-games">' + _html_escape(game_text) + '</div>'
+                    '<div class="issue-action">' + _html_escape(issue.get("next_action")) + '</div>'
+                    '</div>'
+                )
+            st.markdown('<div class="issue-grid">' + ''.join(cards) + '</div>', unsafe_allow_html=True)
+
+            option_map = {
+                f"{i.get('conference')} · Week {i.get('week')} — {i.get('available')} available": i
+                for i in unresolved
+            }
+            selected_issue_label = st.selectbox("Analyze one unresolved issue", list(option_map), key=f"issue_analyze_{idx}_{md.get('season', 'x')}")
+            selected_issue = option_map[selected_issue_label]
+            if st.button("Find the least-disruptive fix", key=f"issue_fix_{idx}_{selected_issue.get('conference')}_{selected_issue.get('week')}", use_container_width=True):
+                fix_intent = Intent(
+                    action="MAKE_CONFERENCE_EVEN",
+                    season=int(md.get("season") or season),
+                    target_week=int(selected_issue.get("week")),
+                    conference=str(selected_issue.get("conference")),
+                    preserve_fbs_conference_parity=True,
+                    max_additional_moves=4,
+                    summary="Resolve selected parity issue",
+                )
+                fixes = optimizer.solve(fix_intent)
+                if fixes:
+                    st.markdown('<div class="section-kicker">BEST NEXT FIX</div>', unsafe_allow_html=True)
+                    # Use a compact move table here to avoid recursively opening another issue register.
+                    fix = fixes[0]
+                    _render_move_outcome("success", "Least-disruptive path found", fix.explanation)
+                    if fix.moves:
+                        fix_df = pd.DataFrame([{
+                            "Game": f"{m.away_team} @ {m.home_team}",
+                            "Current": f"Week {m.from_week}",
+                            "Proposed": f"Week {m.to_week}",
+                        } for m in fix.moves])
+                        st.dataframe(fix_df, use_container_width=True, hide_index=True)
+                else:
+                    _render_move_outcome("conflict", "No direct fix found", "The current public-data constraint graph could not resolve this issue within the move limit.")
 
     if sol.parity_after:
         changed = []
