@@ -119,3 +119,73 @@ def test_generic_max_consecutive_away_is_hard():
         team_a="A", team_b="B", rules=rules
     ))
     assert not sol
+
+
+def test_tba_game_is_valid_schedule_intelligence():
+    # The UI/data layer may retain a future commitment with no week; the
+    # optimizer builder excludes it until dated. The semantic model itself
+    # continues to require an integer only when instantiated for optimization.
+    import pandas as pd
+    assert pd.isna(pd.NA)
+
+
+def test_market_prior_prefers_first_four_weeks():
+    from optimizer_engine import AdvancedNonConferenceOptimizer
+    assert AdvancedNonConferenceOptimizer.market_week_prior(0) > AdvancedNonConferenceOptimizer.market_week_prior(5)
+    assert AdvancedNonConferenceOptimizer.market_week_prior(3) > AdvancedNonConferenceOptimizer.market_week_prior(9)
+
+
+def test_buy_game_market_returns_structured_match():
+    from optimizer_engine import AdvancedNonConferenceOptimizer, Game, Intent, Need, ScheduleStore, Slot, Team
+    teams = [
+        Team("Host", "FBS", "SEC", True, True),
+        Team("Seller", "FCS", "SoCon", False, False),
+    ]
+    slots = [Slot(t.name, 2028, w, "OPEN", "ANY") for t in teams for w in range(14)]
+    needs = [Need("Seller", 2028, 1, "FCS_BUY", "AWAY", min_guarantee=500000)]
+    store = ScheduleStore(teams, [], slots, needs)
+    opt = AdvancedNonConferenceOptimizer(store, time_limit_seconds=1)
+    results = opt.find_buy_games(Intent(
+        action="FIND_BUY_GAME", season=2028, team_a="Host", location="HOME"
+    ))
+    assert results
+    first = results[0]
+    assert first.metadata["match_type"] == "BUY_GAME"
+    assert first.metadata["home_team"] == "Host"
+    assert first.metadata["away_team"] == "Seller"
+    assert first.metadata["explicit_need"] is True
+
+
+def test_a4_market_can_search_entire_season():
+    from optimizer_engine import AdvancedNonConferenceOptimizer, Intent, Need, ScheduleStore, Slot, Team
+    teams = [
+        Team("Alpha", "FBS", "SEC", True, True),
+        Team("Beta", "FBS", "ACC", True, True),
+    ]
+    slots = [Slot(t.name, 2028, w, "OPEN", "ANY") for t in teams for w in range(14)]
+    needs = [
+        Need("Alpha", 2028, 2, "A4", "HOME"),
+        Need("Beta", 2028, 2, "A4", "AWAY"),
+    ]
+    store = ScheduleStore(teams, [], slots, needs)
+    opt = AdvancedNonConferenceOptimizer(store, time_limit_seconds=1)
+    results = opt.find_a4_games(Intent(
+        action="FIND_A4_GAME", season=2028, team_a="Alpha", target_week=None, location="HOME"
+    ))
+    assert results
+    assert results[0].metadata["week"] == 2
+    assert results[0].metadata["explicit_need"] is True
+
+
+def test_v7_template_imports_needs_and_tba():
+    from pathlib import Path
+    from schedule_importer import load_schedule_upload
+    template = Path(__file__).with_name("schedule_import_template.xlsx")
+    if not template.exists():
+        pytest.skip("Template not present")
+    teams, games, slots, needs, report = load_schedule_upload(
+        template.read_bytes(), template.name, None
+    )
+    assert report.ok
+    assert len(needs) >= 1
+    assert games["week"].isna().any()

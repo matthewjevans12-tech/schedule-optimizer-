@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-PRODUCT_ENGINE_VERSION = "5.0.0"
+PRODUCT_ENGINE_VERSION = "7.0.0"
 
 import csv
 import io
@@ -635,131 +635,237 @@ class NonConferenceOptimizer:
                 uniq[sig] = sol
         return sorted(uniq.values(), key=lambda s: (-s.score, len(s.moves)))[:5]
 
-    def find_buy_games(self, intent: Intent) -> List[Solution]:
-        """Find public buy/guarantee-game candidates.
+    @staticmethod
+    def market_week_prior(week: int) -> int:
+        """Soft prior for nonconference market liquidity.
 
-        If the requesting school is FBS, candidates are FCS programs with a mutually
-        open week. If the requesting school is FCS, candidates are FBS programs that
-        have a mutually open week and therefore could be potential guarantee-game
-        hosts. Public data shows schedule openings only; it does not prove intent.
+        Most nonconference inventory is concentrated early in the season.
+        This is deliberately a preference, never a hard constraint.
+        Internal Weeks 0-3 correspond to user-facing Weeks 1-4.
+        """
+        week = int(week)
+        if 0 <= week <= 3:
+            return 24
+        if 4 <= week <= 5:
+            return 10
+        if 6 <= week <= 8:
+            return 4
+        return 0
+
+    def find_buy_games(self, intent: Intent) -> List[Solution]:
+        """Find buy/guarantee-game matches, preferring explicit school needs.
+
+        Weeks 1-4 receive a soft market-liquidity bonus when the user does not
+        require a specific week. Later weeks remain valid.
         """
         if not intent.team_a or intent.season is None:
             return []
         requester = self.store.teams.get(intent.team_a)
         if not requester:
             return []
+
         base_games = self.store.copy_games()
-        weeks = [intent.target_week] if intent.target_week is not None else list(range(0, 14))
+        weeks = [int(intent.target_week)] if intent.target_week is not None else list(range(14))
         results: List[Solution] = []
 
-        # In the synthetic demo we have explicit FCS marketplace needs. Use those when
-        # the requester is an FBS school and a specific week was supplied.
-        if self.store.needs and requester.subdivision == "FBS" and intent.target_week is not None:
-            for need in self.store.needs:
-                candidate = self.store.teams.get(need.team)
-                if not candidate or candidate.subdivision != "FCS":
-                    continue
-                if need.season != intent.season or need.week != intent.target_week:
-                    continue
-                if need.location not in {"AWAY", "ANY"}:
-                    continue
-                if self.store.game_for_team_week(base_games, requester.name, intent.season, intent.target_week):
-                    continue
-                if self.store.game_for_team_week(base_games, candidate.name, intent.season, intent.target_week):
-                    continue
-                if intent.max_guarantee is not None and need.min_guarantee is not None and need.min_guarantee > intent.max_guarantee:
-                    continue
-                ask = f"${need.min_guarantee:,}+" if need.min_guarantee else "not specified"
-                results.append(Solution(
-                    title=f"Week {intent.target_week} — {candidate.name} buy-game match",
-                    moves=[],
-                    score=90 if need.min_guarantee is None else max(50, 100 - (need.min_guarantee / max(intent.max_guarantee or need.min_guarantee, 1)) * 25),
-                    explanation=f"{candidate.name} is available in Week {intent.target_week} and is seeking an away/buy game. Minimum guarantee: {ask}.",
-                ))
-            return sorted(results, key=lambda s: (-s.score, s.title))[:20]
+        explicit_needs = [
+            n for n in self.store.needs
+            if int(n.season) == int(intent.season)
+        ]
 
         wanted_subdivision = "FCS" if requester.subdivision == "FBS" else "FBS"
+
         for week in weeks:
-            if week is None:
+            if self.store.game_for_team_week(base_games, requester.name, int(intent.season), week):
                 continue
-            # The requesting team itself must have no known game that week.
-            if self.store.game_for_team_week(base_games, requester.name, intent.season, int(week)):
+            if not self.store.slot_allows_game(requester.name, int(intent.season), week):
                 continue
+
             for candidate in self.store.teams.values():
                 if candidate.name == requester.name or candidate.subdivision != wanted_subdivision:
                     continue
-                if self.store.game_for_team_week(base_games, candidate.name, intent.season, int(week)):
+                if self.store.game_for_team_week(base_games, candidate.name, int(intent.season), week):
                     continue
-                if requester.subdivision == "FBS":
-                    title = f"Week {week} — {candidate.name} FCS candidate"
-                    explanation = (f"{requester.name} and {candidate.name} both have no known dated non-conference game in Week {week} "
-                                   f"of {intent.season}. This is a public-data candidate for an FBS-hosted buy game; confirm actual interest and guarantee terms in the authoritative scheduling system.")
-                    score = 72
-                else:
-                    title = f"Week {week} — {candidate.name} potential FBS host"
-                    explanation = (f"{requester.name} and {candidate.name} both have no known dated non-conference game in Week {week} "
-                                   f"of {intent.season}. This makes {candidate.name} a public-data candidate for a guarantee/buy-game opportunity; confirm the FBS school's actual need in the authoritative scheduling system.")
-                    score = 74 if candidate.is_a4 else 70
-                results.append(Solution(title=title, moves=[], score=score, explanation=explanation))
+                if not self.store.slot_allows_game(candidate.name, int(intent.season), week):
+                    continue
 
-        # Diversify the year-only result so one week does not consume the whole list.
-        results = sorted(results, key=lambda s: (-s.score, s.title))
-        if intent.target_week is None:
-            by_week: Dict[int, int] = {}
-            diversified: List[Solution] = []
-            for sol in results:
-                m = re.search(r"Week (\d+)", sol.title)
-                week = int(m.group(1)) if m else -1
-                if by_week.get(week, 0) >= 3:
-                    continue
-                diversified.append(sol)
-                by_week[week] = by_week.get(week, 0) + 1
-                if len(diversified) >= 20:
-                    break
-            return diversified
+                candidate_needs = [
+                    n for n in explicit_needs
+                    if n.team == candidate.name and int(n.week) == week
+                    and str(n.need_type).upper() in {"FCS_BUY", "BUY", "FBS", "FBS_BUY"}
+                ]
+                requester_needs = [
+                    n for n in explicit_needs
+                    if n.team == requester.name and int(n.week) == week
+                    and str(n.need_type).upper() in {"FCS_BUY", "BUY", "FBS", "FBS_BUY"}
+                ]
+
+                explicit = bool(candidate_needs or requester_needs)
+                need = candidate_needs[0] if candidate_needs else (requester_needs[0] if requester_needs else None)
+
+                if requester.subdivision == "FBS":
+                    home_team, away_team = requester.name, candidate.name
+                    # Buy-game host is normally HOME. Respect a hard user location request.
+                    if str(intent.location).upper() == "AWAY":
+                        continue
+                    if need and need.location not in {"AWAY", "ANY", "HOME"}:
+                        continue
+                    if intent.max_guarantee is not None and need and need.min_guarantee is not None:
+                        if int(need.min_guarantee) > int(intent.max_guarantee):
+                            continue
+                else:
+                    home_team, away_team = candidate.name, requester.name
+                    if str(intent.location).upper() == "HOME":
+                        continue
+
+                liquidity = self.market_week_prior(week)
+                score = 68 + liquidity + (40 if explicit else 0)
+                if candidate.is_a4 and requester.subdivision == "FCS":
+                    score += 3
+
+                guarantee_text = ""
+                if need:
+                    if need.min_guarantee is not None:
+                        guarantee_text = f" Minimum guarantee: ${int(need.min_guarantee):,}."
+                    elif need.max_guarantee is not None:
+                        guarantee_text = f" Maximum guarantee: ${int(need.max_guarantee):,}."
+
+                market_text = "high-liquidity early-season week" if week <= 3 else "later-season opportunity"
+                intent_text = (
+                    "An explicit compatible school need is recorded."
+                    if explicit
+                    else "This is an availability candidate; confirm actual interest."
+                )
+                results.append(Solution(
+                    title=f"Week {week + 1} · {away_team} @ {home_team}",
+                    moves=[],
+                    score=float(score),
+                    explanation=(
+                        f"{home_team} and {away_team} have no known game in Week {week + 1}. "
+                        f"{intent_text} Week {week + 1} is a {market_text}.{guarantee_text}"
+                    ),
+                    metadata={
+                        "match_type": "BUY_GAME",
+                        "requester": requester.name,
+                        "candidate": candidate.name,
+                        "week": week,
+                        "home_team": home_team,
+                        "away_team": away_team,
+                        "explicit_need": explicit,
+                        "market_liquidity": "HIGH" if week <= 3 else "NORMAL",
+                        "min_guarantee": need.min_guarantee if need else None,
+                        "max_guarantee": need.max_guarantee if need else None,
+                    },
+                ))
+
+        results.sort(
+            key=lambda s: (
+                -float(s.score),
+                int((s.metadata or {}).get("week", 99)),
+                s.title,
+            )
+        )
         return results[:20]
 
     def find_a4_games(self, intent: Intent) -> List[Solution]:
-        if not intent.team_a or intent.season is None or intent.target_week is None:
+        """Find A4-vs-A4 opportunities across one week or the entire season."""
+        if not intent.team_a or intent.season is None:
             return []
         team = self.store.teams.get(intent.team_a)
         if not team or not team.is_a4:
             return []
+
         base_games = self.store.copy_games()
-        if self.store.game_for_team_week(base_games, team.name, intent.season, intent.target_week):
-            return []
+        weeks = [int(intent.target_week)] if intent.target_week is not None else list(range(14))
         results: List[Solution] = []
-        if self.store.needs:
-            for need in self.store.needs:
-                candidate = self.store.teams.get(need.team)
-                if not candidate or not candidate.is_a4 or candidate.name == team.name:
-                    continue
-                if candidate.conference == team.conference:
-                    continue
-                if need.season != intent.season or need.week != intent.target_week or need.need_type != "A4":
-                    continue
-                if self.store.game_for_team_week(base_games, candidate.name, intent.season, intent.target_week):
-                    continue
-                results.append(Solution(
-                    title=f"{team.name} vs {candidate.name}",
-                    moves=[],
-                    score=95,
-                    explanation=f"Both programs are A4, are available in Week {intent.target_week}, and {candidate.name} has an A4 need recorded for that week.",
-                ))
-        else:
+        explicit_needs = [n for n in self.store.needs if int(n.season) == int(intent.season)]
+
+        for week in weeks:
+            if self.store.game_for_team_week(base_games, team.name, int(intent.season), week):
+                continue
+            if not self.store.slot_allows_game(team.name, int(intent.season), week):
+                continue
+
+            requester_needs = [
+                n for n in explicit_needs
+                if n.team == team.name and int(n.week) == week and str(n.need_type).upper() == "A4"
+            ]
+
             for candidate in self.store.teams.values():
-                if not candidate.is_a4 or candidate.name == team.name or candidate.conference == team.conference:
+                if (
+                    not candidate.is_a4
+                    or candidate.name == team.name
+                    or candidate.conference == team.conference
+                ):
                     continue
-                if self.store.game_for_team_week(base_games, candidate.name, intent.season, intent.target_week):
+                if self.store.game_for_team_week(base_games, candidate.name, int(intent.season), week):
                     continue
+                if not self.store.slot_allows_game(candidate.name, int(intent.season), week):
+                    continue
+
+                candidate_needs = [
+                    n for n in explicit_needs
+                    if n.team == candidate.name and int(n.week) == week and str(n.need_type).upper() == "A4"
+                ]
+                explicit = bool(requester_needs and candidate_needs)
+
+                # Determine a sensible site from explicit need/location preferences.
+                requested_location = str(intent.location or "ANY").upper()
+                if requested_location == "AWAY":
+                    home_team, away_team = candidate.name, team.name
+                else:
+                    home_team, away_team = team.name, candidate.name
+
+                # If the candidate explicitly says HOME and requester says HOME,
+                # that is not a compatible pairing.
+                req_loc = requester_needs[0].location if requester_needs else requested_location
+                cand_loc = candidate_needs[0].location if candidate_needs else "ANY"
+                if req_loc == "HOME" and cand_loc == "HOME":
+                    continue
+                if req_loc == "AWAY" and cand_loc == "AWAY":
+                    continue
+                if req_loc == "AWAY":
+                    home_team, away_team = candidate.name, team.name
+                elif cand_loc == "AWAY":
+                    home_team, away_team = team.name, candidate.name
+                elif cand_loc == "HOME":
+                    home_team, away_team = candidate.name, team.name
+
+                liquidity = self.market_week_prior(week)
+                score = 70 + liquidity + (40 if explicit else 0)
                 results.append(Solution(
-                    title=f"{team.name} vs {candidate.name}",
+                    title=f"Week {week + 1} · {away_team} @ {home_team}",
                     moves=[],
-                    score=72,
-                    explanation=(f"{candidate.name} is an A4 program with no known dated non-conference game in "
-                                 f"Week {intent.target_week} in the public snapshot. Confirm that the school actually needs an A4 game."),
+                    score=float(score),
+                    explanation=(
+                        f"{team.name} and {candidate.name} are A4 programs in different conferences "
+                        f"with no known game in Week {week + 1}. "
+                        + (
+                            "Both schools have compatible A4 needs recorded."
+                            if explicit
+                            else "This is an availability candidate; confirm mutual scheduling intent."
+                        )
+                    ),
+                    metadata={
+                        "match_type": "A4",
+                        "requester": team.name,
+                        "candidate": candidate.name,
+                        "week": week,
+                        "home_team": home_team,
+                        "away_team": away_team,
+                        "explicit_need": explicit,
+                        "market_liquidity": "HIGH" if week <= 3 else "NORMAL",
+                    },
                 ))
-        return sorted(results, key=lambda s: (-s.score, s.title))[:12]
+
+        results.sort(
+            key=lambda s: (
+                -float(s.score),
+                int((s.metadata or {}).get("week", 99)),
+                s.title,
+            )
+        )
+        return results[:20]
 
     def _explain_moves(self, moves: List[Move], before: int, after: int) -> str:
         chain = " → ".join(f"{m.home_team}-{m.away_team} W{m.from_week}→W{m.to_week}" for m in moves)
@@ -2669,7 +2775,26 @@ def build_real_store(teams_df: pd.DataFrame, games_df: pd.DataFrame, season: int
         Slot(team=t.name, season=season, week=w, status="OPEN", location="ANY")
         for t in teams for w in range(0, 14)
     ]
-    return ScheduleStore(teams, games, slots, needs=[])
+    needs: List[Need] = []
+    if needs_df is not None and len(needs_df):
+        subset = needs_df[
+            (pd.to_numeric(needs_df["season"], errors="coerce") == int(season))
+            & (needs_df["status"].astype(str).str.upper().isin(["OPEN", "ACTIVE", "HOLD"]))
+        ]
+        for _, r in subset.iterrows():
+            if pd.isna(r.get("week")):
+                continue
+            needs.append(Need(
+                team=str(r["team"]),
+                season=int(season),
+                week=int(r["week"]),
+                need_type=str(r.get("need_type", "") or "").upper(),
+                location=str(r.get("location", "ANY") or "ANY").upper(),
+                min_guarantee=None if pd.isna(r.get("min_guarantee")) else int(r.get("min_guarantee")),
+                max_guarantee=None if pd.isna(r.get("max_guarantee")) else int(r.get("max_guarantee")),
+                notes=str(r.get("notes", "") or ""),
+            ))
+    return ScheduleStore(teams, games, slots, needs=needs)
 
 
 def build_authoritative_store(
@@ -2677,6 +2802,7 @@ def build_authoritative_store(
     games_df: pd.DataFrame,
     slots_df: Optional[pd.DataFrame],
     season: int,
+    needs_df: Optional[pd.DataFrame] = None,
 ) -> ScheduleStore:
     """Build a store from validated administrator-supplied data."""
     teams: List[Team] = []
@@ -2697,7 +2823,12 @@ def build_authoritative_store(
         away = str(r["away_team"])
         if home not in valid_names or away not in valid_names:
             continue
-        week = int(r["week"])
+        raw_week = r.get("week")
+        if pd.isna(raw_week):
+            # Week-TBA commitments belong in schedule intelligence, not the
+            # optimization graph, until a real week is supplied.
+            continue
+        week = int(raw_week)
         moveability = str(r.get("moveability", "MOVABLE") or "MOVABLE").upper()
         game_type = str(r.get("game_type", "NONCONFERENCE") or "NONCONFERENCE").upper()
         explicit_movable = moveability in {"MOVABLE", "FLEXIBLE"}

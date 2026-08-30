@@ -15,6 +15,7 @@ from optimizer_engine import (
     Game,
     Intent,
     Move,
+    Need,
     ScheduleStore,
     Solution,
     Slot,
@@ -83,6 +84,19 @@ div[data-baseweb="select"]>div,.stTextInput input,.stTextArea textarea,.stMultiS
 .game-chip{border:1px solid #dadce0;border-radius:14px;padding:10px 12px;min-width:150px}
 .game-chip-week{font-size:14px;color:#5f6368}.game-chip-opp{font-size:16px;font-weight:650;color:#202124;margin-top:2px}.game-chip-site{font-size:14px;color:#5f6368;margin-top:2px}
 .status-line{font-size:15px;color:#5f6368;margin:8px 0 18px}
+.workspace-bar{border:1px solid #e8eaed;border-radius:18px;padding:14px 16px;margin:4px 0 22px;background:#fafafa}
+.tx-card{border:1px solid #dadce0;border-radius:18px;padding:18px;margin:12px 0;background:#fff}
+.tx-title{font-size:18px;font-weight:650;color:#202124}.tx-meta{font-size:14px;color:#5f6368;margin-top:4px}
+.tx-status{display:inline-block;padding:5px 9px;border-radius:999px;font-size:13px;font-weight:650;background:#f1f3f4;color:#5f6368;margin-top:10px}
+.tx-status.pending{background:#fff8e1;color:#8a5a00}.tx-status.completed{background:#f3fbf5;color:#137333}.tx-status.rejected{background:#fce8e6;color:#c5221f}
+.approval-grid{display:flex;flex-wrap:wrap;gap:7px;margin-top:10px}.approval{font-size:13px;padding:6px 9px;border:1px solid #e8eaed;border-radius:999px;color:#5f6368}
+.approval.accepted{background:#f3fbf5;color:#137333;border-color:#c8e6c9}.approval.pending{background:#fff8e1;color:#8a5a00;border-color:#fdd663}.approval.rejected{background:#fce8e6;color:#c5221f;border-color:#f4c7c3}
+.approval.changes_requested{background:#fce8e6;color:#b06000;border-color:#fdd663}
+.outcome-note{border-left:3px solid #1a73e8;background:#f8fbff;padding:12px 14px;border-radius:0 12px 12px 0;font-size:15px;color:#5f6368;margin:10px 0 18px}
+.market-card{border:1px solid #e8eaed;border-radius:18px;padding:17px 18px;margin:11px 0;background:#fff}
+.market-title{font-size:18px;font-weight:650;color:#202124}.market-meta{font-size:14px;color:#5f6368;margin-top:5px;line-height:1.45}
+.market-high{display:inline-block;margin-top:9px;padding:5px 8px;border-radius:999px;background:#f3fbf5;color:#137333;font-size:13px;font-weight:650}
+.impact-school{font-size:17px;font-weight:650;color:#202124;margin-top:15px}.impact-row{font-size:15px;color:#5f6368;margin:4px 0}
 [data-testid="stDataFrame"]{font-size:15px}
 small,.stCaption,[data-testid="stCaptionContainer"]{font-size:14px!important;color:#80868b!important}
 @media(max-width:800px){
@@ -405,14 +419,31 @@ def feedback_ui(db: WorkspaceDB, season: int, game: Optional[Game], sol: Solutio
             st.success("Feedback saved. This is the structured knowledge the product should accumulate.")
 
 
+def _safe_internal_week(value) -> Optional[int]:
+    try:
+        if pd.isna(value):
+            return None
+        week = int(value)
+        return week if 0 <= week <= 13 else None
+    except Exception:
+        return None
+
+
 def render_all_years(games_df: pd.DataFrame, team: str):
+    """Render every loaded year. Week-TBA commitments are first-class records."""
     subset = games_df[(games_df["home_team"] == team) | (games_df["away_team"] == team)].copy()
     if subset.empty:
         st.info("No known future games for this team.")
         return
+
     years = sorted(int(y) for y in subset["season"].dropna().unique())
     for year in years:
-        ys = subset[subset["season"] == year].copy().sort_values(["week", "date"])
+        ys = subset[subset["season"] == year].copy()
+        ys["_week_sort"] = ys["week"].apply(lambda v: _safe_internal_week(v) if _safe_internal_week(v) is not None else 99)
+        if "date" not in ys.columns:
+            ys["date"] = ""
+        ys = ys.sort_values(["_week_sort", "date", "home_team", "away_team"])
+
         chips = []
         for _, row in ys.iterrows():
             neutral = bool(row.get("neutral", False))
@@ -422,9 +453,15 @@ def render_all_years(games_df: pd.DataFrame, team: str):
             else:
                 opp = str(row["home_team"])
                 site = "Neutral" if neutral else "Away"
+
+            internal = _safe_internal_week(row.get("week"))
+            week_text = f"Week {display_week(internal)}" if internal is not None else "Week TBA"
+            date_text = str(row.get("date", "") or "").strip()
+            meta = site + (f" · {date_text}" if date_text and date_text.lower() not in {"nan", "none"} else "")
+
             chips.append(
-                f'<div class="game-chip"><div class="game-chip-week">Week {display_week(int(row["week"]))}</div>'
-                f'<div class="game-chip-opp">{opp}</div><div class="game-chip-site">{site}</div></div>'
+                f'<div class="game-chip"><div class="game-chip-week">{week_text}</div>'
+                f'<div class="game-chip-opp">{opp}</div><div class="game-chip-site">{meta}</div></div>'
             )
         st.markdown(
             f'<div class="year-row"><div class="year-label">{year}</div><div class="game-chips">{"".join(chips)}</div></div>',
@@ -432,19 +469,724 @@ def render_all_years(games_df: pd.DataFrame, team: str):
         )
 
 
+
+def completed_transactions(db: WorkspaceDB) -> List[Dict[str, object]]:
+    return [
+        item["payload"]
+        for item in db.list_transactions()
+        if str(item["payload"].get("status", "")).upper() == "COMPLETED"
+    ]
+
+
+def apply_completed_transactions_to_dataframe(games_df: pd.DataFrame, db: WorkspaceDB) -> pd.DataFrame:
+    """Overlay completed moves and newly scheduled games, idempotently."""
+    if games_df is None:
+        games_df = pd.DataFrame()
+    out = games_df.copy()
+
+    for tx in completed_transactions(db):
+        # Move existing games.
+        for move in tx.get("moves", []):
+            season = int(move["season"])
+            home = str(move["home_team"])
+            away = str(move["away_team"])
+            to_week = int(move["to_week"])
+            game_id = str(move.get("game_id", "") or "")
+
+            if out.empty:
+                continue
+            mask = (
+                (pd.to_numeric(out["season"], errors="coerce") == season)
+                & (out["home_team"].astype(str) == home)
+                & (out["away_team"].astype(str) == away)
+            )
+            if "game_id" in out.columns and game_id:
+                id_mask = out["game_id"].astype(str) == game_id
+                if id_mask.any():
+                    mask = id_mask
+            idx = out.index[mask]
+            if len(idx):
+                out.loc[idx[0], "week"] = to_week
+
+        # Add newly agreed games.
+        for added in tx.get("add_games", []):
+            season = int(added["season"])
+            home = str(added["home_team"])
+            away = str(added["away_team"])
+            game_id = str(added.get("game_id", "") or "")
+
+            exists = False
+            if not out.empty:
+                if "game_id" in out.columns and game_id:
+                    exists = bool((out["game_id"].astype(str) == game_id).any())
+                if not exists:
+                    exists = bool((
+                        (pd.to_numeric(out["season"], errors="coerce") == season)
+                        & (out["home_team"].astype(str) == home)
+                        & (out["away_team"].astype(str) == away)
+                    ).any())
+            if exists:
+                continue
+
+            row = {c: None for c in out.columns} if len(out.columns) else {}
+            row.update({
+                "game_id": game_id or f"transaction_{tx.get('transaction_id','')}",
+                "season": season,
+                "week": int(added["week"]),
+                "date": added.get("date", ""),
+                "home_team": home,
+                "away_team": away,
+                "neutral": bool(added.get("neutral", False)),
+                "campus_home_team": "" if bool(added.get("neutral", False)) else home,
+                "game_status": "CONTRACTED",
+                "moveability": "UNKNOWN",
+                "game_type": str(added.get("game_type", "NONCONFERENCE")),
+                "source": "Completed scheduling transaction",
+                "confidence": "AUTHORITATIVE",
+                "notes": f"Approved transaction {tx.get('transaction_id','')}",
+            })
+            out = pd.concat([out, pd.DataFrame([row])], ignore_index=True)
+
+    return out
+
+
+def db_need_records(db: WorkspaceDB, season: Optional[int] = None, school: Optional[str] = None) -> List[Dict[str, object]]:
+    records = []
+    for item in db.list("school_need"):
+        payload = dict(item["payload"])
+        if season is not None and int(payload.get("season", -1)) != int(season):
+            continue
+        if school is not None and str(payload.get("team")) != str(school):
+            continue
+        if str(payload.get("status", "OPEN")).upper() not in {"OPEN", "ACTIVE", "HOLD"}:
+            continue
+        records.append(payload)
+    return records
+
+
+def enrich_store_with_db_needs(base: ScheduleStore, db: WorkspaceDB, season: int) -> ScheduleStore:
+    existing = list(base.needs)
+    seen = {(n.team, int(n.season), int(n.week), str(n.need_type).upper(), str(n.location).upper()) for n in existing}
+    for item in db_need_records(db, season=season):
+        key = (
+            str(item["team"]), int(item["season"]), int(item["week"]),
+            str(item["need_type"]).upper(), str(item.get("location", "ANY")).upper(),
+        )
+        if key in seen:
+            continue
+        existing.append(Need(
+            team=key[0],
+            season=key[1],
+            week=key[2],
+            need_type=key[3],
+            location=key[4],
+            min_guarantee=None if item.get("min_guarantee") in (None, "") else int(item["min_guarantee"]),
+            max_guarantee=None if item.get("max_guarantee") in (None, "") else int(item["max_guarantee"]),
+            notes=str(item.get("notes", "") or ""),
+        ))
+        seen.add(key)
+    return ScheduleStore(
+        list(base.teams.values()),
+        list(base.games.values()),
+        list(base.slots.values()),
+        existing,
+    )
+
+
+def rules_for_schools(db: WorkspaceDB, schools: List[str]) -> List[Dict[str, object]]:
+    rules: List[Dict[str, object]] = []
+    seen = set()
+    for school in schools:
+        for rule in persistent_profile_rules(db, school):
+            rid = str(rule.get("rule_id") or json.dumps(rule, sort_keys=True, default=str))
+            if rid not in seen:
+                rules.append(rule)
+                seen.add(rid)
+    return rules
+
+
+def conference_policy(db: WorkspaceDB, conference: str) -> Dict[str, object]:
+    return db.get("conference_policy", conference) or {
+        "conference": conference,
+        "enforce_no_new_parity": True,
+        "require_manual_approval": False,
+        "auto_complete_after_school_approvals": True,
+    }
+
+
+def all_conference_policies(db: WorkspaceDB, store: ScheduleStore) -> Dict[str, Dict[str, object]]:
+    return {conf: conference_policy(db, conf) for conf in store.fbs_conferences()}
+
+
+def governing_conferences(store: ScheduleStore, schools: List[str]) -> List[str]:
+    return sorted({
+        store.teams[s].conference
+        for s in schools
+        if s in store.teams
+        and store.teams[s].subdivision == "FBS"
+        and store.teams[s].conference not in {"", "Unknown", "Independent"}
+    })
+
+
+def school_approvals(affected: List[str], proposer: str) -> Dict[str, str]:
+    return {
+        school: ("ACCEPTED" if school == proposer else "PENDING")
+        for school in affected
+    }
+
+
+def transaction_from_solution(
+    *,
+    sol: Solution,
+    proposer: str,
+    season: int,
+    data_status: str,
+    store: ScheduleStore,
+    conference_policies: Dict[str, Dict[str, object]],
+    context: str = "",
+    objective: Optional[Dict[str, object]] = None,
+    rules: Optional[List[Dict[str, object]]] = None,
+    supersedes: str = "",
+) -> Dict[str, object]:
+    affected = sorted({s for m in sol.moves for s in (m.home_team, m.away_team)})
+    conferences = governing_conferences(store, affected)
+    conf_approvals = {
+        conf: "PENDING"
+        for conf in conferences
+        if bool(conference_policies.get(conf, {}).get("require_manual_approval", False))
+    }
+    return {
+        "status": "PENDING",
+        "season": int(season),
+        "proposer": proposer,
+        "affected_schools": affected,
+        "school_approvals": school_approvals(affected, proposer),
+        "governing_conferences": conferences,
+        "conference_approvals": conf_approvals,
+        "data_status": data_status,
+        "coach_context": context,
+        "moves": [
+            {
+                "game_id": m.game_id,
+                "season": int(season),
+                "home_team": m.home_team,
+                "away_team": m.away_team,
+                "from_week": int(m.from_week),
+                "to_week": int(m.to_week),
+            }
+            for m in sol.moves
+        ],
+        "add_games": [],
+        "objective": objective or {"type": "MOVE_GAME"},
+        "rules": list(rules or []),
+        "supersedes": supersedes,
+        "proof": {
+            "lexicographic_proven": bool((sol.metadata or {}).get("lexicographic_proven", False)),
+            "games_moved": len(sol.moves),
+            "disruption_cost": (sol.metadata or {}).get("disruption_cost"),
+        },
+        "history": [{
+            "at": datetime.now().isoformat(),
+            "actor": proposer,
+            "action": "PROPOSED",
+            "note": context,
+        }],
+    }
+
+
+def parity_impact_of_new_game(
+    store: ScheduleStore,
+    home_team: str,
+    away_team: str,
+    season: int,
+    week: int,
+) -> Dict[str, object]:
+    engine = AdvancedNonConferenceOptimizer(store, time_limit_seconds=2.0)
+    before = odd_keys(engine, store.copy_games(), season)
+    games = store.copy_games()
+    gid = f"candidate_{season}_{week}_{home_team}_{away_team}"
+    games[gid] = Game(
+        game_id=gid,
+        season=season,
+        week=week,
+        home_team=home_team,
+        away_team=away_team,
+        moveable=False,
+        locked=True,
+        campus_home_team=home_team,
+        game_status="CONCEPT",
+        moveability="LOCKED",
+        game_type="NONCONFERENCE",
+        source="Candidate transaction",
+        confidence="INFERRED",
+    )
+    after = odd_keys(engine, games, season)
+    return {
+        "new_issues": sorted(after - before),
+        "resolved_issues": sorted(before - after),
+        "before": before,
+        "after": after,
+    }
+
+
+def transaction_from_match(
+    *,
+    match: Solution,
+    proposer: str,
+    season: int,
+    data_status: str,
+    store: ScheduleStore,
+    conference_policies: Dict[str, Dict[str, object]],
+    need_type: str,
+    supersedes: str = "",
+) -> Dict[str, object]:
+    md = dict(match.metadata or {})
+    home = str(md["home_team"])
+    away = str(md["away_team"])
+    week = int(md["week"])
+    affected = sorted({home, away})
+    conferences = governing_conferences(store, affected)
+    conf_approvals = {
+        conf: "PENDING"
+        for conf in conferences
+        if bool(conference_policies.get(conf, {}).get("require_manual_approval", False))
+    }
+    impact = parity_impact_of_new_game(store, home, away, season, week)
+    return {
+        "status": "PENDING",
+        "season": int(season),
+        "proposer": proposer,
+        "affected_schools": affected,
+        "school_approvals": school_approvals(affected, proposer),
+        "governing_conferences": conferences,
+        "conference_approvals": conf_approvals,
+        "data_status": data_status,
+        "moves": [],
+        "add_games": [{
+            "game_id": f"new_{season}_{week}_{home}_{away}",
+            "season": int(season),
+            "week": week,
+            "home_team": home,
+            "away_team": away,
+            "neutral": False,
+            "game_type": "FCS_GUARANTEE" if need_type == "BUY_GAME" else "A4",
+        }],
+        "objective": {
+            "type": "NEW_GAME",
+            "match_type": need_type,
+            "week": week,
+            "home_team": home,
+            "away_team": away,
+        },
+        "rules": rules_for_schools(db, affected),
+        "supersedes": supersedes,
+        "proof": {
+            "games_moved": 0,
+            "new_game": True,
+            "new_parity_issues": len(impact["new_issues"]),
+            "resolved_parity_issues": len(impact["resolved_issues"]),
+        },
+        "history": [{
+            "at": datetime.now().isoformat(),
+            "actor": proposer,
+            "action": "PROPOSED_NEW_GAME",
+            "note": match.explanation,
+        }],
+    }
+
+
+def confirmation_text(tx: Dict[str, object]) -> str:
+    lines = [
+        f"Subject: {tx.get('season')} Non-Conference Schedule Change — Approved",
+        "",
+        "All affected institutions have approved the following non-conference scheduling transaction:",
+        "",
+    ]
+    for m in tx.get("moves", []):
+        lines.append(
+            f"- {m['away_team']} @ {m['home_team']}: "
+            f"Week {display_week(int(m['from_week']))} to Week {display_week(int(m['to_week']))}"
+        )
+    for g in tx.get("add_games", []):
+        lines.append(
+            f"- New game: {g['away_team']} @ {g['home_team']} — Week {display_week(int(g['week']))}"
+        )
+    lines += [
+        "",
+        "Approved by: " + ", ".join(
+            f"{school} ({status})"
+            for school, status in tx.get("school_approvals", {}).items()
+        ),
+        "",
+        f"Transaction ID: {tx.get('transaction_id','')}",
+    ]
+    return "\n".join(lines)
+
+
+def render_school_impacts(sol: Solution):
+    impacts: Dict[str, List[str]] = {}
+    for move in sol.moves:
+        for school in (move.home_team, move.away_team):
+            impacts.setdefault(school, []).append(
+                f"{move.away_team} @ {move.home_team}: Week {display_week(move.from_week)} → Week {display_week(move.to_week)}"
+            )
+    if not impacts:
+        return
+    st.markdown("**Affected schools**")
+    for school in sorted(impacts):
+        st.markdown(f'<div class="impact-school">{school}</div>', unsafe_allow_html=True)
+        for text in impacts[school]:
+            st.markdown(f'<div class="impact-row">{text}</div>', unsafe_allow_html=True)
+
+
+def transaction_card(tx: Dict[str, object], viewer: str):
+    status = str(tx.get("status", "PENDING")).upper()
+    css = (
+        "completed" if status == "COMPLETED"
+        else "rejected" if status in {"REJECTED", "SUPERSEDED"}
+        else "pending"
+    )
+    moves = list(tx.get("moves", []))
+    additions = list(tx.get("add_games", []))
+    count = len(moves) + len(additions)
+
+    if additions:
+        first = additions[0]
+        title = f"{first.get('away_team','')} @ {first.get('home_team','')}"
+    elif len(moves) == 1:
+        title = f"{moves[0].get('away_team','')} @ {moves[0].get('home_team','')}"
+    else:
+        title = f"{len(moves)}-game coordinated repair"
+
+    st.markdown(
+        f'<div class="tx-card"><div class="tx-title">{title}</div>'
+        f'<div class="tx-meta">Season {tx.get("season")} · Proposed by {tx.get("proposer")} · '
+        f'{count} schedule action{"s" if count != 1 else ""}</div>'
+        f'<span class="tx-status {css}">{status}</span>',
+        unsafe_allow_html=True,
+    )
+
+    approvals = dict(tx.get("school_approvals", {}))
+    if approvals:
+        approval_html = []
+        for school, astatus in approvals.items():
+            acss = str(astatus).lower()
+            approval_html.append(f'<span class="approval {acss}">{school}: {astatus}</span>')
+        st.markdown('<div class="approval-grid">' + "".join(approval_html) + '</div>', unsafe_allow_html=True)
+
+    # Five-second school impact: show viewer's changes first.
+    if viewer in approvals:
+        own = [
+            m for m in moves
+            if viewer in {m.get("home_team"), m.get("away_team")}
+        ]
+        own_add = [
+            g for g in additions
+            if viewer in {g.get("home_team"), g.get("away_team")}
+        ]
+        if own or own_add:
+            st.markdown(f"**Your impact — {viewer}**")
+            for m in own:
+                st.write(
+                    f"• {m['away_team']} @ {m['home_team']}: "
+                    f"Week {display_week(int(m['from_week']))} → Week {display_week(int(m['to_week']))}"
+                )
+            for g in own_add:
+                st.write(
+                    f"• Add {g['away_team']} @ {g['home_team']} in Week {display_week(int(g['week']))}"
+                )
+
+    with st.expander("Full coordinated plan", expanded=viewer not in approvals):
+        for i, m in enumerate(moves, 1):
+            st.write(
+                f"{i}. {m['away_team']} @ {m['home_team']}: "
+                f"Week {display_week(int(m['from_week']))} → Week {display_week(int(m['to_week']))}"
+            )
+        for g in additions:
+            st.write(f"Add {g['away_team']} @ {g['home_team']} — Week {display_week(int(g['week']))}")
+
+    confs = list(tx.get("governing_conferences", []))
+    if confs:
+        st.caption("Automated conference guardrails: " + ", ".join(confs))
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def market_result_card(
+    match: Solution,
+    *,
+    store: ScheduleStore,
+    season: int,
+    policies: Dict[str, Dict[str, object]],
+) -> Tuple[bool, Dict[str, object]]:
+    md = dict(match.metadata or {})
+    home = str(md["home_team"])
+    away = str(md["away_team"])
+    week = int(md["week"])
+    impact = parity_impact_of_new_game(store, home, away, season, week)
+
+    relevant_confs = governing_conferences(store, [home, away])
+    blocked = bool(impact["new_issues"]) and any(
+        bool(policies.get(c, {}).get("enforce_no_new_parity", True))
+        for c in relevant_confs
+    )
+
+    st.markdown(
+        f'<div class="market-card"><div class="market-title">{away} @ {home} · Week {display_week(week)}</div>'
+        f'<div class="market-meta">{match.explanation}</div>'
+        + (
+            '<span class="market-high">High-opportunity Weeks 1–4</span>'
+            if str(md.get("market_liquidity")) == "HIGH" else ""
+        )
+        + '</div>',
+        unsafe_allow_html=True,
+    )
+    if md.get("explicit_need"):
+        st.caption("✓ Compatible explicit school need is recorded.")
+    if impact["resolved_issues"]:
+        st.success(f"This matchup resolves {len(impact['resolved_issues'])} modeled conference parity issue(s).")
+    if impact["new_issues"]:
+        st.warning(f"This matchup creates {len(impact['new_issues'])} modeled parity issue(s).")
+    if blocked:
+        st.caption("Conference guardrails prevent proposing this matchup as currently structured.")
+    return blocked, impact
+
+
+def easiest_relocation(
+    store: ScheduleStore,
+    game: Game,
+    *,
+    rules: List[Dict[str, object]],
+    preserve_parity: bool,
+) -> Optional[Tuple[int, Solution]]:
+    candidates: List[Tuple[Tuple[int, int, int], int, Solution]] = []
+    for target in range(14):
+        if target == game.week:
+            continue
+        run_engine = AdvancedNonConferenceOptimizer(store, time_limit_seconds=2.2)
+        result = run_engine.solve_move_game(Intent(
+            action="MOVE_GAME",
+            season=int(game.season),
+            target_week=target,
+            team_a=game.home_team,
+            team_b=game.away_team,
+            preserve_fbs_conference_parity=preserve_parity,
+            max_additional_moves=10,
+            rules=rules,
+        ))
+        if not result:
+            continue
+        sol = result[0]
+        # Minimum changes first; then early-market preference; then displacement.
+        key = (
+            len(sol.moves),
+            0 if target <= 3 else 1,
+            abs(target - game.week),
+        )
+        candidates.append((key, target, sol))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: x[0])
+    return candidates[0][1], candidates[0][2]
+
+
+def save_school_need(
+    db: WorkspaceDB,
+    *,
+    team: str,
+    season: int,
+    display_weeks: List[int],
+    need_type: str,
+    location: str,
+    min_guarantee: Optional[int],
+    max_guarantee: Optional[int],
+    notes: str,
+):
+    for display in display_weeks:
+        week = internal_week(display)
+        key = f"{team}|{season}|{need_type}|{week}"
+        db.put("school_need", key, {
+            "team": team,
+            "season": int(season),
+            "week": week,
+            "need_type": need_type,
+            "location": location,
+            "min_guarantee": min_guarantee,
+            "max_guarantee": max_guarantee,
+            "status": "OPEN",
+            "notes": notes,
+        })
+
+
+def try_counterproposal(
+    *,
+    tx: Dict[str, object],
+    school: str,
+    game_id: str,
+    requested_week: int,
+    store: ScheduleStore,
+    db: WorkspaceDB,
+    policies: Dict[str, Dict[str, object]],
+    data_status: str,
+) -> Tuple[Optional[str], str]:
+    """Automatically re-solve a school's suggested alternative."""
+    objective = dict(tx.get("objective", {}))
+    affected = list(tx.get("affected_schools", []))
+    combined_rules = rules_for_schools(db, affected)
+    old_tx_id = str(tx.get("transaction_id", ""))
+
+    # Direct new-game counterproposal: move the proposed new matchup to another week.
+    if objective.get("type") == "NEW_GAME":
+        additions = list(tx.get("add_games", []))
+        if not additions:
+            return None, "No proposed new game was found."
+        g = additions[0]
+        home, away = str(g["home_team"]), str(g["away_team"])
+        if store.game_for_team_week(store.copy_games(), home, int(tx["season"]), requested_week):
+            return None, f"{home} already has a known game in Week {display_week(requested_week)}."
+        if store.game_for_team_week(store.copy_games(), away, int(tx["season"]), requested_week):
+            return None, f"{away} already has a known game in Week {display_week(requested_week)}."
+
+        impact = parity_impact_of_new_game(store, home, away, int(tx["season"]), requested_week)
+        confs = governing_conferences(store, [home, away])
+        if impact["new_issues"] and any(
+            bool(policies.get(c, {}).get("enforce_no_new_parity", True)) for c in confs
+        ):
+            return None, "That week creates a protected conference parity issue."
+
+        fake_match = Solution(
+            title="Counterproposal",
+            moves=[],
+            score=100,
+            explanation=f"{school} suggested Week {display_week(requested_week)}.",
+            metadata={
+                "home_team": home,
+                "away_team": away,
+                "week": requested_week,
+                "match_type": objective.get("match_type", "NEW_GAME"),
+            },
+        )
+        payload = transaction_from_match(
+            match=fake_match,
+            proposer=school,
+            season=int(tx["season"]),
+            data_status=data_status,
+            store=store,
+            conference_policies=policies,
+            need_type=str(objective.get("match_type", "NEW_GAME")),
+            supersedes=old_tx_id,
+        )
+        new_id = db.create_transaction(payload)
+        db.set_transaction_status(old_tx_id, "SUPERSEDED", actor=school, note=f"Replaced by {new_id}.")
+        return new_id, f"Feasible counterproposal created for Week {display_week(requested_week)}."
+
+    # Find the original game in the current schedule.
+    target_game = store.games.get(game_id)
+    if not target_game:
+        for g in store.games.values():
+            if g.game_id == game_id:
+                target_game = g
+                break
+    if not target_game:
+        return None, "The selected game is not available in the active schedule."
+
+    preserve = any(
+        bool(policies.get(c, {}).get("enforce_no_new_parity", True))
+        for c in tx.get("governing_conferences", [])
+    )
+
+    if objective.get("type") == "CONFERENCE_EVEN":
+        exact_rule = {
+            "rule_id": f"counter_{game_id}",
+            "hardness": "MUST",
+            "rule_type": "GAME_WEEK_WINDOW",
+            "game_id": game_id,
+            "team": "",
+            "start_week": requested_week,
+            "end_week": requested_week,
+            "value": 1,
+            "active": True,
+            "note": f"{school} requested this week.",
+        }
+        conf = str(objective.get("conference"))
+        weeks = [int(w) for w in objective.get("target_weeks", [])]
+        run_engine = AdvancedNonConferenceOptimizer(store, time_limit_seconds=12.0)
+        plans = run_engine.optimize_national(Intent(
+            action="OPTIMIZE_NATIONAL",
+            season=int(tx["season"]),
+            target_weeks=weeks,
+            conferences=[conf],
+            conference=conf,
+            all_conferences=False,
+            preserve_fbs_conference_parity=True,
+            max_additional_moves=60,
+            rules=combined_rules + [exact_rule],
+            summary="Counterproposal conference repair",
+        ))
+        if not plans or bool((plans[0].metadata or {}).get("infeasible")):
+            return None, "That suggested week cannot preserve the conference's required outcome."
+        payload = transaction_from_solution(
+            sol=plans[0],
+            proposer=school,
+            season=int(tx["season"]),
+            data_status=data_status,
+            store=store,
+            conference_policies=policies,
+            context=f"{school} counterproposal",
+            objective=objective,
+            rules=combined_rules + [exact_rule],
+            supersedes=old_tx_id,
+        )
+    else:
+        run_engine = AdvancedNonConferenceOptimizer(store, time_limit_seconds=6.0)
+        results = run_engine.solve_move_game(Intent(
+            action="MOVE_GAME",
+            season=int(tx["season"]),
+            target_week=requested_week,
+            team_a=target_game.home_team,
+            team_b=target_game.away_team,
+            preserve_fbs_conference_parity=preserve,
+            max_additional_moves=10,
+            rules=combined_rules,
+            summary="School counterproposal",
+        ))
+        if not results:
+            return None, "The suggested week is not feasible under current school and conference rules."
+        payload = transaction_from_solution(
+            sol=results[0],
+            proposer=school,
+            season=int(tx["season"]),
+            data_status=data_status,
+            store=store,
+            conference_policies=policies,
+            context=f"{school} counterproposal",
+            objective=objective or {"type": "MOVE_GAME"},
+            rules=combined_rules,
+            supersedes=old_tx_id,
+        )
+
+    new_id = db.create_transaction(payload)
+    db.set_transaction_status(old_tx_id, "SUPERSEDED", actor=school, note=f"Replaced by counterproposal {new_id}.")
+    return new_id, "A feasible revised transaction was created automatically."
+
+
 # ------------------------ workspace / data ----------------------------
 
 db = get_db()
 
-st.markdown('<div class="simple-title">College Football Scheduling Optimizer</div>', unsafe_allow_html=True)
+st.markdown('<div class="simple-title">College Football Scheduling</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="simple-sub">Find the fewest realistic changes required to get from the schedule you have to the schedule you want.</div>',
+    '<div class="simple-sub">Solve the scheduling problem, coordinate every affected school, and collect unanimous approval in one place.</div>',
     unsafe_allow_html=True,
 )
 
-with st.sidebar:
-    st.markdown("### Workspace")
-    data_mode = st.radio("Schedule data", ["Authoritative upload", "Public prototype", "Demo"], key="data_mode")
+top1, top2 = st.columns([1.2, 1])
+with top1:
+    data_mode = st.selectbox(
+        "Schedule data",
+        ["Public prototype", "Authoritative upload", "Demo"],
+        index=0,
+        help="Use authoritative data before relying on a recommendation operationally.",
+    )
 
 public_teams_df = None
 public_games_df = None
@@ -452,10 +1194,11 @@ store = None
 all_games_df = pd.DataFrame()
 all_teams_df = pd.DataFrame()
 slots_df = pd.DataFrame()
+needs_df = pd.DataFrame()
 report_ok = True
 
 if data_mode == "Authoritative upload":
-    with st.sidebar:
+    with st.expander("Authoritative schedule data", expanded=True):
         st.download_button(
             "Download Excel template",
             data=make_template_bytes(),
@@ -465,38 +1208,29 @@ if data_mode == "Authoritative upload":
         )
         uploaded = st.file_uploader("Upload schedule", type=["xlsx", "xlsm", "csv"])
 
-    # Public metadata is optional help for CSV team matching.
     if uploaded is not None:
         raw = uploaded.getvalue()
-        # Excel is the preferred authoritative format because it carries Teams.
-        # Only CSV needs public metadata assistance.
         if uploaded.name.lower().endswith(".csv"):
             try:
                 public_teams_df, _, _ = scrape_fbschedules_public(tuple(range(2027, 2038)))
             except Exception:
                 public_teams_df = None
-        else:
-            public_teams_df = None
-
-        teams_df, games_df, slots_df, report = load_schedule_upload(raw, uploaded.name, public_teams_df)
+        all_teams_df, all_games_df, slots_df, needs_df, report = load_schedule_upload(
+            raw, uploaded.name, public_teams_df
+        )
         report_ok = report.ok
-        with st.sidebar:
-            if report.errors:
-                for e in report.errors:
-                    st.error(e)
-            if report.warnings:
-                for w in report.warnings:
-                    st.warning(w)
-            for msg in report.info:
-                st.caption(msg)
+        for e in report.errors:
+            st.error(e)
+        for w in report.warnings:
+            st.warning(w)
+        for msg in report.info:
+            st.caption(msg)
         if report.ok:
-            all_teams_df = teams_df
-            all_games_df = games_df
-            # Persist normalized snapshot if DB is durable; useful in pilot too.
             db.put("data_snapshot", "latest", {
-                "teams": teams_df.to_dict("records"),
-                "games": games_df.to_dict("records"),
+                "teams": all_teams_df.to_dict("records"),
+                "games": all_games_df.to_dict("records"),
                 "slots": slots_df.to_dict("records"),
+                "needs": needs_df.to_dict("records"),
                 "source_name": uploaded.name,
                 "saved_at": datetime.now().isoformat(),
             })
@@ -506,10 +1240,10 @@ if data_mode == "Authoritative upload":
             all_teams_df = pd.DataFrame(snapshot.get("teams", []))
             all_games_df = pd.DataFrame(snapshot.get("games", []))
             slots_df = pd.DataFrame(snapshot.get("slots", []))
-            with st.sidebar:
-                st.caption(f"Using saved snapshot: {snapshot.get('source_name','latest')}")
+            needs_df = pd.DataFrame(snapshot.get("needs", []))
+            st.caption(f"Using saved authoritative snapshot: {snapshot.get('source_name','latest')}")
         else:
-            st.info("Upload the authoritative schedule workbook to begin. The Excel template includes Teams, Games, and optional Slots.")
+            st.info("Upload the authoritative schedule workbook, or switch to Public prototype to explore immediately.")
             st.stop()
 
 elif data_mode == "Public prototype":
@@ -523,311 +1257,607 @@ else:
     all_teams_df = pd.DataFrame([asdict(t) for t in demo.teams.values()])
     all_games_df = pd.DataFrame([asdict(g) for g in demo.games.values()])
 
+all_games_df = apply_completed_transactions_to_dataframe(all_games_df, db)
+
 available_years = sorted(int(y) for y in all_games_df["season"].dropna().unique())
 if not available_years:
     st.error("No seasons are available in the current data.")
     st.stop()
 
-with st.sidebar:
+with top2:
     default_year = 2028 if 2028 in available_years else available_years[0]
     season = st.selectbox("Active season", available_years, index=available_years.index(default_year))
 
 if data_mode == "Authoritative upload":
-    store = build_authoritative_store(all_teams_df, all_games_df, slots_df, int(season))
+    store = build_authoritative_store(
+        all_teams_df, all_games_df, slots_df, int(season), needs_df
+    )
 elif data_mode == "Public prototype":
     store = build_real_store(all_teams_df, all_games_df, int(season))
 else:
-    # Demo currently contains a single modeled season; rebuild directly.
-    demo = build_demo_store()
-    store = demo
+    store = build_demo_store()
 
+store = enrich_store_with_db_needs(store, db, int(season))
 engine = AdvancedNonConferenceOptimizer(store, time_limit_seconds=6.0)
 status_text, status_class = data_label(data_mode, report_ok)
+policies = all_conference_policies(db, store)
+
 st.markdown(
-    f'<div style="text-align:center;margin-top:-15px;margin-bottom:24px">'
+    f'<div style="text-align:center;margin:2px 0 20px">'
     f'<span class="data-pill {status_class}">● {status_text}</span></div>',
     unsafe_allow_html=True,
 )
 
 if not db.durable:
-    with st.sidebar:
-        st.caption("Pilot persistence: local SQLite. Add DATABASE_URL in Streamlit Secrets for durable Postgres storage.")
+    st.caption("Pilot persistence is local SQLite. Add DATABASE_URL for durable school needs, proposals and audit history.")
 
 
 # ------------------------------ UI -----------------------------------
 
-tab_repair, tab_schedules = st.tabs(["Repair", "Schedules"])
+perspective = st.radio(
+    "Workspace",
+    ["School", "Conference"],
+    horizontal=True,
+    label_visibility="collapsed",
+)
 
-with tab_repair:
-    st.markdown('<div class="page-title">Repair</div>', unsafe_allow_html=True)
+season_games = sorted(list(store.games.values()), key=lambda g: (g.week, g.home_team, g.away_team))
+all_team_names = sorted(store.teams.keys())
+
+if perspective == "School":
+    school_names = all_team_names
+    default_school = school_names.index("Georgia") if "Georgia" in school_names else 0
+    acting_school = st.selectbox("School", school_names, index=default_school)
+
+    st.markdown(f'<div class="page-title">{acting_school}</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="page-copy">One outcome at a time. Add only the real-world constraints that matter.</div>',
+        '<div class="page-copy">Your schedule, your needs, and every proposal requiring your approval.</div>',
         unsafe_allow_html=True,
     )
-    repair_scope = st.radio("Repair", ["Game", "Conference"], horizontal=True)
 
-    season_games = sorted(
-        list(store.games.values()),
-        key=lambda g: (g.week, g.home_team, g.away_team),
-    )
-    teams = sorted(store.teams.keys())
+    tab_schedule, tab_solve, tab_needs, tab_proposals = st.tabs([
+        "My Schedule", "Solve", "Needs & Opportunities", "Proposals"
+    ])
 
-    if repair_scope == "Game":
-        movable_games = [g for g in season_games if str(g.game_type).upper() != "CONFERENCE"]
-        game_teams = sorted({t for g in movable_games for t in (g.home_team, g.away_team)})
-        if not movable_games:
-            st.info("No non-conference games are loaded for this season.")
-        else:
-            c1, c2 = st.columns([1, 2])
-            with c1:
-                default_team = game_teams.index("Georgia") if "Georgia" in game_teams else 0
-                selected_team = st.selectbox("School", game_teams, index=default_team)
-            team_games = [g for g in movable_games if g.involves(selected_team)]
-            labels = {game_label(g): g for g in team_games}
-            with c2:
-                selected_game = labels[st.selectbox("Game", list(labels.keys()))]
+    with tab_schedule:
+        profile_rules = persistent_profile_rules(db, acting_school)
+        if profile_rules:
+            st.caption(f"{len(profile_rules)} saved scheduling rule{'s' if len(profile_rules) != 1 else ''}")
+        render_all_years(all_games_df, acting_school)
 
-            target_display = st.selectbox(
-                "Move to",
-                list(range(1, 15)),
-                index=int(selected_game.week),
-            )
-            target_week = internal_week(target_display)
+    with tab_solve:
+        outcome = st.radio(
+            "What do you need to accomplish?",
+            ["Move a game", "Make my school open", "Find a buy game", "Find an A4 opponent"],
+            horizontal=True,
+        )
+        acting_conf = store.teams.get(acting_school).conference if acting_school in store.teams else ""
+        preserve_parity = bool(conference_policy(db, acting_conf).get("enforce_no_new_parity", True)) if acting_conf else False
 
-            with st.expander("Add constraints or preferences", expanded=False):
-                other_games = [g for g in season_games if g.game_id != selected_game.game_id]
-                rules, protected_ids, avoid_ids, context = constraint_builder(
-                    db,
-                    prefix=f"game_{season}_{selected_game.game_id}",
-                    primary_team=selected_team,
-                    teams=teams,
-                    games=other_games,
+        if outcome == "Move a game":
+            school_games = [
+                g for g in season_games
+                if g.involves(acting_school) and str(g.game_type).upper() != "CONFERENCE"
+            ]
+            if not school_games:
+                st.info("No dated non-conference games are available to move in the active season.")
+            else:
+                labels = {game_label(g): g for g in school_games}
+                selected_game = labels[st.selectbox("Game", list(labels.keys()), key=f"solve_move_game_{acting_school}")]
+                target_display = st.selectbox(
+                    "Move to", list(range(1, 15)), index=int(selected_game.week),
+                    key=f"solve_move_week_{acting_school}",
                 )
-                preserve_parity = st.checkbox("Cannot create a new FBS conference parity problem", value=False)
+                target_week = internal_week(target_display)
 
-            if data_mode == "Public prototype":
-                st.markdown(
-                    '<div class="status-line">Public mode can test product behavior, but game moveability and open weeks are inferred.</div>',
-                    unsafe_allow_html=True,
-                )
+                with st.expander("Constraints & preferences", expanded=False):
+                    rules, protected_ids, avoid_ids, context = constraint_builder(
+                        db,
+                        prefix=f"solve_move_{season}_{acting_school}_{selected_game.game_id}",
+                        primary_team=acting_school,
+                        teams=all_team_names,
+                        games=[g for g in season_games if g.game_id != selected_game.game_id],
+                    )
 
-            if st.button("Find best path", type="primary", use_container_width=True):
-                if target_week == selected_game.week:
-                    st.info("That game is already in the selected week.")
-                else:
+                if st.button("Solve", type="primary", use_container_width=True, key=f"solve_move_{acting_school}"):
                     run_store = store_with_locked(store, protected_ids)
                     run_engine = AdvancedNonConferenceOptimizer(run_store, time_limit_seconds=6.0)
                     intent = build_move_intent(selected_game, target_week, rules, avoid_ids, context, preserve_parity)
-                    with st.spinner("Finding the smallest realistic repair chain…"):
+                    with st.spinner("Looking across every affected schedule…"):
                         results = run_engine.solve_move_game(intent)
-                    st.session_state["last_game_result"] = {
-                        "intent": intent,
+                    st.session_state[f"solve_result_{acting_school}"] = {
                         "result": results[0] if results else None,
-                        "game": selected_game,
+                        "intent": intent,
                         "protected": protected_ids,
+                        "context": context,
+                        "objective": {
+                            "type": "MOVE_GAME",
+                            "game_id": selected_game.game_id,
+                            "requested_week": target_week,
+                        },
                     }
 
-            state = st.session_state.get("last_game_result")
-            if state and state.get("game") and state["game"].game_id == selected_game.game_id:
-                sol = state.get("result")
-                intent = state.get("intent")
-                run_store = store_with_locked(store, set(state.get("protected") or set()))
-                run_engine = AdvancedNonConferenceOptimizer(run_store, time_limit_seconds=6.0)
+                state = st.session_state.get(f"solve_result_{acting_school}")
+                if state:
+                    sol = state.get("result")
+                    run_store = store_with_locked(store, set(state.get("protected") or set()))
+                    run_engine = AdvancedNonConferenceOptimizer(run_store, time_limit_seconds=6.0)
+                    if sol:
+                        render_result(run_engine, sol, season=int(season), data_status=status_text)
+                        render_school_impacts(sol)
+                        if st.button("Send coordinated proposal", type="primary", use_container_width=True, key=f"send_move_{acting_school}"):
+                            payload = transaction_from_solution(
+                                sol=sol,
+                                proposer=acting_school,
+                                season=int(season),
+                                data_status=status_text,
+                                store=run_store,
+                                conference_policies=policies,
+                                context=str(state.get("context", "")),
+                                objective=state.get("objective"),
+                                rules=list(state.get("intent").rules or []),
+                            )
+                            tx_id = db.create_transaction(payload)
+                            db.record_transaction_action(
+                                tx_id, actor=acting_school, action="SENT_TO_AFFECTED_SCHOOLS",
+                                note="Unanimous school approval requested."
+                            )
+                            st.success(f"Proposal {tx_id} sent to every affected school.")
+                    else:
+                        st.error("No feasible path satisfies the current school and conference rules.")
 
-                if sol:
-                    render_result(run_engine, sol, season=int(season), data_status=status_text)
+        elif outcome == "Make my school open":
+            open_display = st.selectbox("I need to be open in", list(range(1, 15)), key=f"open_week_{acting_school}")
+            open_week = internal_week(open_display)
+            occupied = store.game_for_team_week(store.copy_games(), acting_school, int(season), open_week)
+            if occupied is None:
+                st.success(f"{acting_school} is already open in Week {open_display}.")
+            elif str(occupied.game_type).upper() == "CONFERENCE":
+                st.error("That week contains a conference game and cannot be repaired through the nonconference workflow.")
+            else:
+                st.markdown(f"Current conflict: **{occupied.away_team} @ {occupied.home_team}**")
+                rules = rules_for_schools(db, [acting_school])
+                if st.button("Find easiest way to open this week", type="primary", use_container_width=True):
+                    with st.spinner("Searching the smallest relocation chain…"):
+                        answer = easiest_relocation(
+                            store, occupied, rules=rules, preserve_parity=preserve_parity
+                        )
+                    st.session_state[f"open_result_{acting_school}"] = answer
+                answer = st.session_state.get(f"open_result_{acting_school}")
+                if answer:
+                    destination, sol = answer
+                    st.markdown(
+                        f'<div class="outcome-note">Best path moves the current game to <strong>Week {display_week(destination)}</strong>.</div>',
+                        unsafe_allow_html=True,
+                    )
+                    render_result(engine, sol, season=int(season), data_status=status_text)
+                    render_school_impacts(sol)
+                    if st.button("Send coordinated proposal", type="primary", use_container_width=True, key=f"send_open_{acting_school}"):
+                        payload = transaction_from_solution(
+                            sol=sol,
+                            proposer=acting_school,
+                            season=int(season),
+                            data_status=status_text,
+                            store=store,
+                            conference_policies=policies,
+                            objective={"type": "MAKE_SCHOOL_OPEN", "school": acting_school, "week": open_week},
+                            rules=rules,
+                        )
+                        tx_id = db.create_transaction(payload)
+                        st.success(f"Proposal {tx_id} sent to every affected school.")
+
+        else:
+            match_type = "BUY_GAME" if outcome == "Find a buy game" else "A4"
+            if match_type == "A4" and not store.teams[acting_school].is_a4:
+                st.warning("This school is not classified as A4 in the current data.")
+            else:
+                week_choice = st.selectbox(
+                    "Week",
+                    ["Best available"] + list(range(1, 15)),
+                    key=f"market_week_{acting_school}_{match_type}",
+                )
+                target_week = None if week_choice == "Best available" else internal_week(int(week_choice))
+                location = st.selectbox(
+                    "Site preference",
+                    ["HOME", "ANY", "AWAY"] if match_type == "A4" else ["HOME", "ANY"],
+                    key=f"market_location_{acting_school}_{match_type}",
+                )
+                max_guarantee = None
+                if match_type == "BUY_GAME":
+                    max_guarantee = st.number_input(
+                        "Maximum guarantee (optional)",
+                        min_value=0, value=0, step=50000,
+                        key=f"market_guarantee_{acting_school}",
+                    )
+                    if max_guarantee == 0:
+                        max_guarantee = None
+
+                st.markdown(
+                    '<div class="outcome-note">Weeks 1–4 receive a market-liquidity preference when all else is equal. Later weeks remain valid.</div>',
+                    unsafe_allow_html=True,
+                )
+
+                if st.button("Find best matches", type="primary", use_container_width=True, key=f"find_market_{acting_school}_{match_type}"):
+                    intent = Intent(
+                        action="FIND_BUY_GAME" if match_type == "BUY_GAME" else "FIND_A4_GAME",
+                        season=int(season),
+                        target_week=target_week,
+                        team_a=acting_school,
+                        location=location,
+                        max_guarantee=max_guarantee,
+                    )
+                    results = engine.solve(intent)
+                    st.session_state[f"market_results_{acting_school}_{match_type}"] = results
+
+                results = st.session_state.get(f"market_results_{acting_school}_{match_type}", [])
+                if results:
+                    for idx, match in enumerate(results[:8]):
+                        blocked, impact = market_result_card(
+                            match, store=store, season=int(season), policies=policies
+                        )
+                        if not blocked:
+                            if st.button(
+                                "Propose matchup",
+                                use_container_width=True,
+                                key=f"propose_match_{acting_school}_{match_type}_{idx}",
+                            ):
+                                payload = transaction_from_match(
+                                    match=match,
+                                    proposer=acting_school,
+                                    season=int(season),
+                                    data_status=status_text,
+                                    store=store,
+                                    conference_policies=policies,
+                                    need_type=match_type,
+                                )
+                                tx_id = db.create_transaction(payload)
+                                st.success(f"Proposal {tx_id} sent to {match.metadata.get('candidate')}.")
+
+    with tab_needs:
+        st.markdown("### Tell the market what you need")
+        st.caption("Explicit school needs make matching much stronger than inferring an open date.")
+        need_type_label = st.selectbox(
+            "Need",
+            ["FCS buy game", "A4 opponent"],
+            key=f"need_type_{acting_school}",
+        )
+        need_type = "FCS_BUY" if need_type_label == "FCS buy game" else "A4"
+        need_year = st.selectbox(
+            "Season",
+            available_years,
+            index=available_years.index(season),
+            key=f"need_year_{acting_school}",
+        )
+        need_weeks = st.multiselect(
+            "Acceptable weeks",
+            list(range(1, 15)),
+            default=[1, 2, 3, 4],
+            key=f"need_weeks_{acting_school}",
+        )
+        need_location = st.selectbox(
+            "Location",
+            ["HOME", "ANY", "AWAY"],
+            key=f"need_location_{acting_school}",
+        )
+        min_g = max_g = None
+        if need_type == "FCS_BUY":
+            g1, g2 = st.columns(2)
+            with g1:
+                min_value = st.number_input(
+                    "Minimum guarantee (optional)", min_value=0, value=0, step=50000,
+                    key=f"need_min_g_{acting_school}",
+                )
+            with g2:
+                max_value = st.number_input(
+                    "Maximum guarantee (optional)", min_value=0, value=0, step=50000,
+                    key=f"need_max_g_{acting_school}",
+                )
+            min_g = None if min_value == 0 else int(min_value)
+            max_g = None if max_value == 0 else int(max_value)
+        need_notes = st.text_input("Notes (optional)", key=f"need_notes_{acting_school}")
+        if st.button("Publish need", type="primary", use_container_width=True, key=f"publish_need_{acting_school}"):
+            if not need_weeks:
+                st.warning("Choose at least one acceptable week.")
+            else:
+                save_school_need(
+                    db, team=acting_school, season=int(need_year),
+                    display_weeks=need_weeks, need_type=need_type,
+                    location=need_location, min_guarantee=min_g,
+                    max_guarantee=max_g, notes=need_notes,
+                )
+                st.success("Need published to the scheduling market.")
+                st.rerun()
+
+        current_needs = db_need_records(db, school=acting_school)
+        if current_needs:
+            st.markdown("### Open needs")
+            need_rows = [{
+                "Season": n["season"],
+                "Week": display_week(int(n["week"])),
+                "Need": n["need_type"],
+                "Location": n["location"],
+                "Min guarantee": n.get("min_guarantee"),
+                "Max guarantee": n.get("max_guarantee"),
+            } for n in current_needs]
+            st.dataframe(pd.DataFrame(need_rows), use_container_width=True, hide_index=True)
+
+    with tab_proposals:
+        relevant = [
+            item["payload"] for item in db.list_transactions()
+            if acting_school in item["payload"].get("affected_schools", [])
+            or acting_school == item["payload"].get("proposer")
+        ]
+        if not relevant:
+            st.info("No proposals involve this school yet.")
+        else:
+            for tx in relevant:
+                tx_id = str(tx.get("transaction_id"))
+                transaction_card(tx, acting_school)
+                status = str(tx.get("status", "PENDING")).upper()
+                approvals = dict(tx.get("school_approvals", {}))
+                my_status = approvals.get(acting_school)
+
+                if status == "PENDING" and my_status == "PENDING":
                     c1, c2 = st.columns(2)
                     with c1:
-                        scenario_name = st.text_input("Scenario name", value=f"{selected_game.home_team}-{selected_game.away_team} repair")
-                        if st.button("Save scenario", use_container_width=True):
-                            db.put("scenario", scenario_name, scenario_payload(sol, int(season), scenario_name, status_text))
-                            st.success("Scenario saved.")
+                        if st.button("Accept", type="primary", use_container_width=True, key=f"accept_{tx_id}_{acting_school}"):
+                            updated = db.set_school_approval(tx_id, acting_school, "ACCEPTED")
+                            if updated and updated.get("status") == "COMPLETED":
+                                st.success("Unanimous approval complete. The schedule has been updated.")
+                            else:
+                                st.success("Accepted. Waiting on the remaining schools.")
+                            st.rerun()
                     with c2:
-                        if st.button("See alternative strategies", use_container_width=True):
-                            with st.spinner("Testing human tradeoff strategies…"):
-                                alts = run_engine.solve_move_game_alternatives(intent, sol)
-                            st.session_state["last_alternatives"] = alts
+                        if st.button("Reject", use_container_width=True, key=f"reject_toggle_{tx_id}_{acting_school}"):
+                            st.session_state[f"show_reject_{tx_id}_{acting_school}"] = True
 
-                    alts = st.session_state.get("last_alternatives", [])
-                    if alts:
-                        with st.expander("Alternative strategies", expanded=True):
-                            for i, alt in enumerate(alts, 1):
-                                render_result(run_engine, alt, season=int(season), data_status=status_text, label=str((alt.metadata or {}).get("strategy_label","ALTERNATIVE")).upper())
+                    if st.session_state.get(f"show_reject_{tx_id}_{acting_school}"):
+                        reason = st.selectbox(
+                            "Why doesn't it work?",
+                            ["Coach preference", "Contract issue", "Travel issue", "Game cannot move", "Financial issue", "Other"],
+                            key=f"reject_reason_{tx_id}_{acting_school}",
+                        )
+                        note = st.text_input("Detail", key=f"reject_note_{tx_id}_{acting_school}")
+                        if st.button("Confirm rejection", use_container_width=True, key=f"confirm_reject_{tx_id}_{acting_school}"):
+                            db.set_school_approval(tx_id, acting_school, "REJECTED", f"{reason}: {note}")
+                            db.add_feedback(
+                                season=int(tx.get("season")),
+                                team=acting_school,
+                                game_id="",
+                                reason=reason,
+                                notes=note,
+                                payload=tx,
+                            )
+                            st.rerun()
 
-                    with st.expander("Why this works", expanded=False):
-                        st.write(sol.explanation)
-                        stages = list((sol.metadata or {}).get("lexicographic_stages") or [])
-                        if stages:
-                            st.dataframe(pd.DataFrame([{
-                                "Priority": s.get("stage"),
-                                "Result": s.get("value"),
-                                "Proof": "Proven" if s.get("proven") else ("Skipped" if s.get("status") == "SKIPPED" else "Best found"),
-                            } for s in stages]), use_container_width=True, hide_index=True)
-                    feedback_ui(db, int(season), selected_game, sol, f"feedback_{selected_game.game_id}")
-                elif state:
-                    st.error("No path satisfies every active hard constraint.")
-                    if st.button("Explain why blocked", use_container_width=True):
-                        # On-demand one-rule relaxation diagnosis.
-                        relaxations = []
-                        base_rules = list(intent.rules or [])
-                        hard_rules = [r for r in base_rules if str(r.get("hardness","")).upper() in {"MUST","CANNOT"}]
-                        for idx, rule in enumerate(hard_rules[:6]):
-                            test_rules = [r for r in base_rules if r is not rule]
-                            test_intent = replace(intent, rules=test_rules)
-                            test_results = run_engine.solve_move_game(test_intent)
-                            if test_results:
-                                relaxations.append((rule_summary(rule), len(test_results[0].moves)))
-                        if protected_ids:
-                            unlocked_engine = AdvancedNonConferenceOptimizer(store, time_limit_seconds=3.0)
-                            unlocked = unlocked_engine.solve_move_game(intent)
-                            if unlocked:
-                                relaxations.append(("Allow one or more protected games to move", len(unlocked[0].moves)))
-                        st.session_state["block_relaxations"] = relaxations
-                    relaxations = st.session_state.get("block_relaxations", [])
-                    if relaxations:
-                        st.markdown("**Smallest tested relaxations that restore feasibility**")
-                        for label, count in relaxations:
-                            st.write(f"• {label} → feasible with {count} game change{'s' if count != 1 else ''}")
+                    with st.expander("Suggest another week", expanded=False):
+                        relevant_moves = [
+                            m for m in tx.get("moves", [])
+                            if acting_school in {m.get("home_team"), m.get("away_team")}
+                        ]
+                        additions = [
+                            g for g in tx.get("add_games", [])
+                            if acting_school in {g.get("home_team"), g.get("away_team")}
+                        ]
+                        options = {}
+                        for m in relevant_moves:
+                            options[f"{m['away_team']} @ {m['home_team']}"] = str(m["game_id"])
+                        for g in additions:
+                            options[f"{g['away_team']} @ {g['home_team']} (new game)"] = str(g["game_id"])
+                        if options:
+                            chosen_label = st.selectbox("Game", list(options.keys()), key=f"counter_game_{tx_id}_{acting_school}")
+                            alt_display = st.selectbox("Suggested week", list(range(1, 15)), key=f"counter_week_{tx_id}_{acting_school}")
+                            alt_note = st.text_input("Why?", key=f"counter_note_{tx_id}_{acting_school}")
+                            if st.button("Test and send counterproposal", type="primary", use_container_width=True, key=f"counter_send_{tx_id}_{acting_school}"):
+                                new_id, message = try_counterproposal(
+                                    tx=tx,
+                                    school=acting_school,
+                                    game_id=options[chosen_label],
+                                    requested_week=internal_week(alt_display),
+                                    store=store,
+                                    db=db,
+                                    policies=policies,
+                                    data_status=status_text,
+                                )
+                                if new_id:
+                                    st.success(message)
+                                    st.rerun()
+                                else:
+                                    st.error(message)
 
-    else:
-        conferences = engine.store.fbs_conferences()
-        default_conf = conferences.index("SEC") if "SEC" in conferences else 0
-        selected_conf = st.selectbox("Conference", conferences, index=default_conf)
+                elif status == "PENDING" and my_status == "ACCEPTED":
+                    st.caption("You have accepted. Waiting on the remaining affected schools.")
+                elif status == "COMPLETED":
+                    st.success("Completed — unanimous approval is on record and the schedule is updated.")
+                    text = confirmation_text(tx)
+                    with st.expander("Approval confirmation", expanded=False):
+                        st.text_area("Reply-all equivalent", value=text, height=200, disabled=True, key=f"confirm_text_{tx_id}")
+                        st.download_button(
+                            "Download confirmation",
+                            data=text.encode("utf-8"),
+                            file_name=f"{tx_id}_approval_confirmation.txt",
+                            mime="text/plain",
+                            key=f"download_confirmation_{tx_id}",
+                        )
+                elif status == "SUPERSEDED":
+                    st.caption("Superseded by a revised proposal.")
+                elif status == "REJECTED":
+                    st.error("This proposal was rejected.")
+
+                with st.expander("Audit history", expanded=False):
+                    history = list(tx.get("history", []))
+                    if history:
+                        st.dataframe(pd.DataFrame(history), use_container_width=True, hide_index=True)
+
+else:
+    confs = engine.store.fbs_conferences()
+    default_conf = confs.index("SEC") if "SEC" in confs else 0
+    acting_conf = st.selectbox("Conference", confs, index=default_conf)
+
+    st.markdown(f'<div class="page-title">{acting_conf} oversight</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="page-copy">Solve conference-wide problems, send one coordinated proposal, and let the affected schools negotiate and approve it inside the platform.</div>',
+        unsafe_allow_html=True,
+    )
+
+    conf_solve, conf_transactions, conf_governance, conf_schedules = st.tabs([
+        "Solve", "Transactions", "Governance", "Schedules"
+    ])
+
+    with conf_solve:
+        st.markdown("### Make conference weeks even")
         selected_display_weeks = st.multiselect(
             "Weeks that must be even",
             list(range(1, 15)),
             default=[1, 2, 3],
         )
         selected_weeks = [internal_week(w) for w in selected_display_weeks]
-
-        members = sorted(t.name for t in store.conference_members(selected_conf))
+        members = sorted(t.name for t in store.conference_members(acting_conf))
         member_set = set(members)
-        conf_games = [
-            g for g in season_games
-            if g.home_team in member_set or g.away_team in member_set
-        ]
+        conf_games = [g for g in season_games if g.home_team in member_set or g.away_team in member_set]
 
         current_odd = []
-        for w in selected_weeks:
-            value = engine.conference_parity(store.copy_games(), int(season), w).get(selected_conf, "")
-            if str(value).startswith("ODD"):
-                current_odd.append(w)
-        if selected_weeks:
-            if current_odd:
-                st.markdown(
-                    '<div class="status-line"><strong>'
-                    f'{len(current_odd)} selected week{"s" if len(current_odd)!=1 else ""} need repair:</strong> '
-                    + ", ".join(f"Week {display_week(w)}" for w in current_odd)
-                    + "</div>",
-                    unsafe_allow_html=True,
-                )
-            else:
-                st.success("Every selected week is already even.")
+        for week in selected_weeks:
+            state = engine.conference_parity(store.copy_games(), int(season), week).get(acting_conf, "")
+            if str(state).startswith("ODD"):
+                current_odd.append(week)
+        if current_odd:
+            st.markdown(
+                '<div class="outcome-note">Needs repair: '
+                + ", ".join(f"Week {display_week(w)}" for w in current_odd)
+                + ".</div>",
+                unsafe_allow_html=True,
+            )
 
-        with st.expander("Add constraints or preferences", expanded=False):
+        with st.expander("Constraints & preferences", expanded=False):
             rules, protected_ids, avoid_ids, context = constraint_builder(
                 db,
-                prefix=f"conf_{season}_{selected_conf}",
-                primary_team=members[0] if members else teams[0],
-                teams=members if members else teams,
+                prefix=f"confsolve_{season}_{acting_conf}",
+                primary_team=members[0] if members else all_team_names[0],
+                teams=members if members else all_team_names,
                 games=conf_games,
             )
 
-        if st.button("Find best conference plan", type="primary", use_container_width=True):
+        if st.button("Solve conference problem", type="primary", use_container_width=True):
             run_store = store_with_locked(store, protected_ids)
             run_engine = AdvancedNonConferenceOptimizer(run_store, time_limit_seconds=12.0)
             intent = Intent(
                 action="OPTIMIZE_NATIONAL",
                 season=int(season),
                 target_weeks=selected_weeks,
-                conferences=[selected_conf],
-                conference=selected_conf,
+                conferences=[acting_conf],
+                conference=acting_conf,
                 all_conferences=False,
                 preserve_fbs_conference_parity=True,
                 max_additional_moves=60,
                 avoid_game_ids=sorted(avoid_ids),
                 coach_context=context,
-                rules=rules,
-                summary="Repair conference selected weeks",
+                rules=rules + rules_for_schools(db, members),
+                summary="Make selected conference weeks even",
             )
-            with st.spinner("Enforcing selected weeks, then minimizing game changes…"):
+            with st.spinner("Looking across all affected schedules and minimizing the coordinated changes…"):
                 plans = run_engine.optimize_national(intent)
-            st.session_state["last_conf_result"] = {
-                "intent": intent,
+            st.session_state[f"conf_plan_{acting_conf}"] = {
                 "result": plans[0] if plans else None,
-                "protected": protected_ids,
-                "conference": selected_conf,
+                "store": run_store,
+                "rules": intent.rules,
+                "context": context,
+                "weeks": selected_weeks,
             }
 
-        state = st.session_state.get("last_conf_result")
-        if state and state.get("conference") == selected_conf:
-            sol = state.get("result")
-            run_store = store_with_locked(store, set(state.get("protected") or set()))
-            run_engine = AdvancedNonConferenceOptimizer(run_store, time_limit_seconds=12.0)
-            if sol and not bool((sol.metadata or {}).get("infeasible")):
-                render_result(run_engine, sol, season=int(season), data_status=status_text, label="BEST CONFERENCE PLAN")
-                scenario_name = st.text_input("Scenario name", value=f"{selected_conf} Weeks {'-'.join(map(str,selected_display_weeks))}")
-                if st.button("Save conference scenario", use_container_width=True):
-                    db.put("scenario", scenario_name, scenario_payload(sol, int(season), scenario_name, status_text))
-                    st.success("Scenario saved.")
-                feedback_ui(db, int(season), None, sol, f"feedback_conf_{selected_conf}")
+        state = st.session_state.get(f"conf_plan_{acting_conf}")
+        if state:
+            plan = state.get("result")
+            if plan and not bool((plan.metadata or {}).get("infeasible")):
+                run_engine = AdvancedNonConferenceOptimizer(state["store"], time_limit_seconds=12.0)
+                render_result(run_engine, plan, season=int(season), data_status=status_text, label="BEST COORDINATED PLAN")
+                render_school_impacts(plan)
+                affected = sorted({s for m in plan.moves for s in (m.home_team, m.away_team)})
+                st.markdown(
+                    f'<div class="outcome-note"><strong>{len(affected)} schools</strong> must approve. '
+                    f'The platform sends one proposal and records each Yes/No/counterproposal.</div>',
+                    unsafe_allow_html=True,
+                )
+                if st.button("Send to all affected schools", type="primary", use_container_width=True):
+                    objective = {
+                        "type": "CONFERENCE_EVEN",
+                        "conference": acting_conf,
+                        "target_weeks": list(state["weeks"]),
+                    }
+                    payload = transaction_from_solution(
+                        sol=plan,
+                        proposer=acting_conf,
+                        season=int(season),
+                        data_status=status_text,
+                        store=state["store"],
+                        conference_policies=policies,
+                        context=str(state.get("context", "")),
+                        objective=objective,
+                        rules=list(state.get("rules") or []),
+                    )
+                    tx_id = db.create_transaction(payload)
+                    db.record_transaction_action(
+                        tx_id,
+                        actor=acting_conf,
+                        action="SENT_TO_ALL_AFFECTED_SCHOOLS",
+                        note=f"{len(affected)} schools asked for unanimous approval.",
+                    )
+                    st.success(f"One coordinated proposal sent to {len(affected)} schools.")
             elif state:
-                st.error("No plan satisfies every selected week and every active hard constraint.")
-                st.caption("The optimizer will not label a partial parity repair as successful.")
-                if st.button("Explain why blocked", use_container_width=True, key=f"explain_conf_{selected_conf}"):
-                    base_intent = state.get("intent")
-                    relaxations = []
-                    hard_rules = [
-                        r for r in (base_intent.rules or [])
-                        if str(r.get("hardness", "")).upper() in {"MUST", "CANNOT"}
-                    ]
-                    for rule in hard_rules[:6]:
-                        test_rules = [r for r in (base_intent.rules or []) if r is not rule]
-                        test_engine = AdvancedNonConferenceOptimizer(run_store, time_limit_seconds=3.0)
-                        test_intent = replace(base_intent, rules=test_rules)
-                        test = test_engine.optimize_national(test_intent)
-                        if test and not bool((test[0].metadata or {}).get("infeasible")):
-                            relaxations.append((rule_summary(rule), len(test[0].moves)))
-                    if state.get("protected"):
-                        unlocked_engine = AdvancedNonConferenceOptimizer(store, time_limit_seconds=3.0)
-                        unlocked = unlocked_engine.optimize_national(base_intent)
-                        if unlocked and not bool((unlocked[0].metadata or {}).get("infeasible")):
-                            relaxations.append(("Allow one or more protected games to move", len(unlocked[0].moves)))
-                    st.session_state[f"conf_relax_{selected_conf}"] = relaxations
+                st.error("No plan satisfies all selected conference outcomes and hard constraints.")
 
-                conf_relax = st.session_state.get(f"conf_relax_{selected_conf}", [])
-                if conf_relax:
-                    st.markdown("**Smallest tested relaxations that restore feasibility**")
-                    for label, count in conf_relax:
-                        st.write(f"• {label} → feasible with {count} game change{'s' if count != 1 else ''}")
+    with conf_transactions:
+        relevant = [
+            item["payload"] for item in db.list_transactions()
+            if acting_conf in item["payload"].get("governing_conferences", [])
+            or item["payload"].get("proposer") == acting_conf
+        ]
+        if not relevant:
+            st.info("No transactions involve this conference yet.")
+        else:
+            for tx in relevant:
+                tx_id = str(tx.get("transaction_id"))
+                transaction_card(tx, acting_conf)
+                status = str(tx.get("status", "PENDING")).upper()
+                approvals = dict(tx.get("school_approvals", {}))
+                if status == "PENDING":
+                    pending = [s for s, v in approvals.items() if v == "PENDING"]
+                    accepted = [s for s, v in approvals.items() if v == "ACCEPTED"]
+                    st.caption(f"{len(accepted)} accepted · {len(pending)} pending")
+                if status == "COMPLETED":
+                    st.success("Unanimous school approval complete.")
+                    with st.expander("Final confirmation", expanded=False):
+                        text = confirmation_text(tx)
+                        st.text_area("Approval record", value=text, height=200, disabled=True, key=f"conf_confirm_{tx_id}")
+                if tx.get("suggestions"):
+                    with st.expander("School counterproposals", expanded=True):
+                        st.dataframe(pd.DataFrame(tx["suggestions"]), use_container_width=True, hide_index=True)
 
+    with conf_governance:
+        policy = conference_policy(db, acting_conf)
+        enforce_parity = st.checkbox(
+            "Do not allow a school transaction to create a new conference parity issue",
+            value=bool(policy.get("enforce_no_new_parity", True)),
+        )
+        require_manual = st.checkbox(
+            "Require conference approval after every affected school accepts",
+            value=bool(policy.get("require_manual_approval", False)),
+            help="Leave this off to make school-to-school transactions truly self-service.",
+        )
+        if st.button("Save governance", type="primary", use_container_width=True):
+            db.put("conference_policy", acting_conf, {
+                "conference": acting_conf,
+                "enforce_no_new_parity": bool(enforce_parity),
+                "require_manual_approval": bool(require_manual),
+                "auto_complete_after_school_approvals": True,
+            })
+            st.success("Governance saved.")
+        if not require_manual:
+            st.success("Self-service mode is active: unanimous school approval completes an ordinary transaction.")
 
-with tab_schedules:
-    st.markdown('<div class="page-title">Schedules</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="page-copy">Use the schedule as the intelligence layer: see one team across every loaded year, inspect a conference, and compare saved scenarios.</div>',
-        unsafe_allow_html=True,
-    )
-
-    view = st.radio("View", ["Team — all years", "Conference — active season", "Scenarios"], horizontal=True)
-
-    if view == "Team — all years":
-        team_names = sorted(all_teams_df["name"].dropna().astype(str).unique())
-        default_team = team_names.index("Georgia") if "Georgia" in team_names else 0
-        schedule_team = st.selectbox("Team", team_names, index=default_team)
-        profile_rules = persistent_profile_rules(db, schedule_team)
-        if profile_rules:
-            with st.expander(f"{len(profile_rules)} saved scheduling rule{'s' if len(profile_rules)!=1 else ''}", expanded=False):
-                for r in profile_rules:
-                    st.write("• " + rule_summary(r))
-        render_all_years(all_games_df, schedule_team)
-
-    elif view == "Conference — active season":
-        conferences = engine.store.fbs_conferences()
-        default_conf = conferences.index("SEC") if "SEC" in conferences else 0
-        conf = st.selectbox("Conference", conferences, index=default_conf)
-        members = sorted(t.name for t in store.conference_members(conf))
+    with conf_schedules:
         rows = []
+        members = sorted(t.name for t in store.conference_members(acting_conf))
         for team in members:
             games = sorted([g for g in store.games.values() if g.involves(team)], key=lambda g: g.week)
             row = {"School": team}
@@ -836,54 +1866,13 @@ with tab_schedules:
                 if game:
                     opp = game.away_team if game.home_team == team else game.home_team
                     site = game.site_for(team)
-                    row[f"W{display_week(w)}"] = f"{'vs' if site=='HOME' else '@' if site=='AWAY' else 'N'} {opp}"
+                    row[f"W{display_week(w)}"] = f"{'vs' if site == 'HOME' else '@' if site == 'AWAY' else 'N'} {opp}"
                 else:
                     row[f"W{display_week(w)}"] = ""
             rows.append(row)
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True, height=650)
-        odd_rows = []
-        for w in range(14):
-            value = engine.conference_parity(store.copy_games(), int(season), w).get(conf, "")
-            if str(value).startswith("ODD"):
-                odd_rows.append({"Week": display_week(w), "State": value})
-        if odd_rows:
-            with st.expander(f"{len(odd_rows)} modeled odd week{'s' if len(odd_rows)!=1 else ''}", expanded=False):
-                st.dataframe(pd.DataFrame(odd_rows), use_container_width=True, hide_index=True)
-
-    else:
-        scenarios = db.list("scenario")
-        if not scenarios:
-            st.info("Save a repair result and it will appear here.")
-        else:
-            names = [s["key"] for s in scenarios]
-            selected = st.selectbox("Scenario", names)
-            item = next(s for s in scenarios if s["key"] == selected)
-            payload = item["payload"]
-            st.markdown(f"### {payload.get('title', selected)}")
-            st.caption(f"Season {payload.get('season')} · {payload.get('data_status')}")
-            moves = payload.get("moves", [])
-            if moves:
-                st.dataframe(pd.DataFrame([{
-                    "Game": f"{m['away_team']} @ {m['home_team']}",
-                    "Current": f"Week {display_week(m['from_week'])}",
-                    "Proposed": f"Week {display_week(m['to_week'])}",
-                } for m in moves]), use_container_width=True, hide_index=True)
-
-            if len(scenarios) >= 2:
-                with st.expander("Compare two scenarios", expanded=False):
-                    a = st.selectbox("Scenario A", names, index=0, key="scenario_a")
-                    b = st.selectbox("Scenario B", names, index=1 if len(names)>1 else 0, key="scenario_b")
-                    pa = next(s["payload"] for s in scenarios if s["key"] == a)
-                    pb = next(s["payload"] for s in scenarios if s["key"] == b)
-                    comp = pd.DataFrame([
-                        {"Measure": "Games moved", a: pa.get("games_moved", 0), b: pb.get("games_moved", 0)},
-                        {"Measure": "Disruption cost", a: pa.get("metadata",{}).get("disruption_cost", "—"), b: pb.get("metadata",{}).get("disruption_cost", "—")},
-                        {"Measure": "Data status", a: pa.get("data_status", ""), b: pb.get("data_status", "")},
-                        {"Measure": "Minimum-change proof", a: "Proven" if pa.get("metadata",{}).get("lexicographic_proven") else "Best found", b: "Proven" if pb.get("metadata",{}).get("lexicographic_proven") else "Best found"},
-                    ])
-                    st.dataframe(comp, use_container_width=True, hide_index=True)
 
 st.caption(
-    "Pilot-ready architecture · Set DATABASE_URL for durable Postgres persistence. "
-    "Public prototype data is intentionally labeled as partial/inferred."
+    "V7 milestone: solve the multi-school problem, send one coordinated proposal, automate counterproposals, "
+    "collect unanimous school approval, and update the schedule without the conference office brokering every call."
 )
