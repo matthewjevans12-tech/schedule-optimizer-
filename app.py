@@ -1151,11 +1151,23 @@ class AdvancedNonConferenceOptimizer(NonConferenceOptimizer):
                 score=100.0,
                 explanation=f"{intent.conference} is already even in Week {intent.target_week}: {current}.",
             )]
+
+        # Odd/even requests are intentionally simple: first ask whether exactly
+        # ONE game can solve the selected conference/week. Do not launch the
+        # national CP-SAT repair merely because other parity issues exist.
+        simple = NonConferenceOptimizer.solve_make_conference_even(self, intent)
+        one_move = [sol for sol in simple if len(sol.moves) == 1]
+        if one_move:
+            self.last_solver_status = "Single-move search"
+            self.last_solver_seconds = 0.0
+            return sorted(one_move, key=lambda s: (-s.score, abs(s.moves[0].to_week - s.moves[0].from_week)))[:5]
+
+        # Only escalate when the direct one-game search has no solution.
         if ORTOOLS_AVAILABLE:
             result = self._cp_optimize(intent, "parity")
             if result:
                 return result
-        return super().solve_make_conference_even(intent)
+        return simple
 
     def optimize_national(self, intent: Intent) -> List[Solution]:
         if ORTOOLS_AVAILABLE:
@@ -2145,6 +2157,184 @@ def _clear_workspace_moves(season: int) -> None:
     st.session_state[_workspace_move_key(season)] = {}
 
 
+def _conference_nonconf_state(store: ScheduleStore, games: Dict[str, Game], season: int, conference: str, week: int) -> Dict[str, object]:
+    """Return the simple weekly state administrators actually care about."""
+    members = store.conference_members(conference)
+    member_names = {t.name for t in members}
+    nonconf_teams: Set[str] = set()
+    game_ids: List[str] = []
+    for game in games.values():
+        if game.season != season or game.week != week:
+            continue
+        home = store.teams.get(game.home_team)
+        away = store.teams.get(game.away_team)
+        if home and away and home.subdivision == away.subdivision == "FBS" and home.conference == away.conference == conference:
+            continue
+        involved = False
+        if game.home_team in member_names:
+            nonconf_teams.add(game.home_team)
+            involved = True
+        if game.away_team in member_names:
+            nonconf_teams.add(game.away_team)
+            involved = True
+        if involved:
+            game_ids.append(game.game_id)
+    nonconf_count = len(nonconf_teams)
+    available = max(0, len(members) - nonconf_count)
+    return {
+        "conference_size": len(members),
+        "nonconf_count": nonconf_count,
+        "available": available,
+        "is_even": available % 2 == 0,
+        "nonconf_teams": sorted(nonconf_teams),
+        "game_ids": game_ids,
+    }
+
+
+def _odd_parity_keys(optimizer: AdvancedNonConferenceOptimizer, games: Dict[str, Game], season: int) -> Set[Tuple[str, int]]:
+    bad: Set[Tuple[str, int]] = set()
+    for w in range(0, 14):
+        for conf, status in optimizer.conference_parity(games, season, w).items():
+            if status.startswith("ODD"):
+                bad.add((conf, w))
+    return bad
+
+
+def _simple_parity_candidates(
+    store: ScheduleStore,
+    optimizer: AdvancedNonConferenceOptimizer,
+    season: int,
+    conference: str,
+    target_week: int,
+) -> Dict[str, List[Dict[str, object]]]:
+    """Rank one-game fixes before invoking a network optimizer.
+
+    add: move one game involving exactly one conference member INTO target week.
+    remove: move one such game OUT of target week.
+
+    A candidate is "clean" when it fixes the requested conference/week without
+    turning any currently-even FBS conference/week into a new odd state.
+    """
+    base = store.copy_games()
+    base_bad = _odd_parity_keys(optimizer, base, season)
+    members = {t.name for t in store.conference_members(conference)}
+    out: Dict[str, List[Dict[str, object]]] = {"add": [], "remove": []}
+
+    def conf_coeff(game: Game) -> int:
+        home = store.teams.get(game.home_team)
+        away = store.teams.get(game.away_team)
+        if home and away and home.subdivision == away.subdivision == "FBS" and home.conference == away.conference == conference:
+            return 0
+        return int(game.home_team in members) + int(game.away_team in members)
+
+    def evaluate(game: Game, to_week: int, direction: str) -> Optional[Dict[str, object]]:
+        if game.locked or not game.moveable or to_week == game.week:
+            return None
+        # A one-game fix must represent exactly one conference team appearance.
+        if conf_coeff(game) != 1:
+            return None
+        # Both teams must be free of another known game in the destination week.
+        for team in (game.home_team, game.away_team):
+            if store.game_for_team_week(base, team, season, to_week, exclude_game_id=game.game_id):
+                return None
+            if not store.slot_allows_game(team, season, to_week):
+                return None
+        after = dict(base)
+        after[game.game_id] = replace(game, week=int(to_week))
+        target_state = _conference_nonconf_state(store, after, season, conference, target_week)
+        if not target_state["is_even"]:
+            return None
+        after_bad = _odd_parity_keys(optimizer, after, season)
+        created = sorted(after_bad - base_bad)
+        resolved = sorted(base_bad - after_bad)
+        clean = len(created) == 0
+        # Prefer clean moves, then moves that create the fewest new issues,
+        # then moves that resolve more existing issues, then the shortest date move.
+        rank = (
+            0 if clean else 1,
+            len(created),
+            -len(resolved),
+            abs(int(to_week) - int(game.week)),
+            game.away_team,
+            game.home_team,
+        )
+        return {
+            "game_id": game.game_id,
+            "game": game,
+            "direction": direction,
+            "from_week": int(game.week),
+            "to_week": int(to_week),
+            "clean": clean,
+            "created": created,
+            "resolved": resolved,
+            "rank": rank,
+            "target_nonconf": int(target_state["nonconf_count"]),
+            "target_available": int(target_state["available"]),
+        }
+
+    # ADD ONE: bring one conference non-conference appearance into the target week.
+    for game in base.values():
+        if game.season != season or game.week == target_week or conf_coeff(game) != 1:
+            continue
+        candidate = evaluate(game, target_week, "add")
+        if candidate:
+            out["add"].append(candidate)
+
+    # REMOVE ONE: move one current target-week non-conference game to another mutually open week.
+    for game in base.values():
+        if game.season != season or game.week != target_week or conf_coeff(game) != 1:
+            continue
+        for to_week in range(0, 14):
+            if to_week == target_week:
+                continue
+            candidate = evaluate(game, to_week, "remove")
+            if candidate:
+                out["remove"].append(candidate)
+
+    # Show distinct best alternatives rather than dozens of dates for the same game.
+    out["add"].sort(key=lambda x: x["rank"])
+    out["remove"].sort(key=lambda x: x["rank"])
+    best_remove_by_game: Dict[str, Dict[str, object]] = {}
+    for item in out["remove"]:
+        best_remove_by_game.setdefault(str(item["game_id"]), item)
+    out["remove"] = sorted(best_remove_by_game.values(), key=lambda x: x["rank"])
+    return out
+
+
+def _render_simple_parity_option(candidate: Dict[str, object], season: int, key_prefix: str, rank: int) -> None:
+    game: Game = candidate["game"]  # type: ignore[assignment]
+    clean = bool(candidate["clean"])
+    created = list(candidate["created"])
+    resolved = list(candidate["resolved"])
+    label = f"{game.away_team} @ {game.home_team}"
+    badge = "CLEAN MOVE" if clean else f"{len(created)} TRADEOFF{'S' if len(created) != 1 else ''}"
+    badge_class = "good" if clean else "bad"
+    detail = f"Week {candidate['from_week']} → Week {candidate['to_week']} · 1 game moved"
+    if resolved:
+        detail += f" · resolves {len(resolved)} existing parity issue{'s' if len(resolved) != 1 else ''}"
+    st.markdown(
+        '<div class="result-card" style="margin:0 0 10px">'
+        '<div class="result-top">'
+        f'<div><div class="result-rank">OPTION {rank}</div><div class="result-title">{_html_escape(label)}</div></div>'
+        f'<span class="status-chip {badge_class}">{badge}</span>'
+        '</div>'
+        f'<div class="result-summary">{_html_escape(detail)}</div>'
+        '<div class="result-kpis" style="grid-template-columns:repeat(3,minmax(0,1fr))">'
+        f'<div class="result-kpi"><div class="result-kpi-label">NON-CONF TEAMS</div><div class="result-kpi-value">{candidate["target_nonconf"]}</div></div>'
+        f'<div class="result-kpi"><div class="result-kpi-label">AVAILABLE</div><div class="result-kpi-value">{candidate["target_available"]}</div></div>'
+        f'<div class="result-kpi"><div class="result-kpi-label">SECONDARY MOVES</div><div class="result-kpi-value">0</div></div>'
+        '</div></div>',
+        unsafe_allow_html=True,
+    )
+    if created:
+        created_text = ", ".join(f"{c} W{w}" for c, w in created[:4])
+        st.caption(f"Tradeoff: this one-game move would create {created_text}.")
+    if st.button("Use this move", key=f"{key_prefix}_{candidate['game_id']}_{candidate['to_week']}_{rank}", type="primary" if rank == 1 and clean else "secondary", use_container_width=True):
+        _set_workspace_move(season, str(candidate["game_id"]), int(candidate["to_week"]))
+        st.session_state[f"simple_parity_feedback_{season}"] = f"Applied {label}: Week {candidate['from_week']} → Week {candidate['to_week']}"
+        st.rerun()
+
+
 def apply_workspace_moves(store: ScheduleStore, year_games: pd.DataFrame, season: int) -> pd.DataFrame:
     """Apply interactive what-if moves to the in-memory workspace only.
 
@@ -3088,15 +3278,76 @@ with tab_opt:
     default_sec = conferences.index("SEC") if "SEC" in conferences else 0
 
     if report == "Odd / Even":
-        st.markdown('<div class="section-kicker">ODD / EVEN</div><div class="section-copy">Force the selected conference/week back to an even number of teams available for conference play while preventing new parity problems in weeks that are currently healthy.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-kicker">ODD / EVEN</div><div class="section-title">Fix the week with one move.</div><div class="section-copy">Start with the simplest answer: move one non-conference game into or out of the selected week. The network optimizer is only used if a clean one-game solution does not exist.</div>', unsafe_allow_html=True)
         a, b = st.columns(2)
         with a:
             conf = st.selectbox("Conference", conferences, index=default_sec, key="opt_parity_conf")
         with b:
             week = st.selectbox("Week", list(range(0, 14)), index=2, key="opt_parity_week")
-        current = optimizer.conference_parity(store.copy_games(), season, week).get(conf, "Unknown")
-        _render_move_outcome("info", f"{conf} · Week {week}", current, "This is the current conference parity state before optimization.")
-        _run_and_render(Intent(action="MAKE_CONFERENCE_EVEN", season=season, target_week=week, conference=conf, max_additional_moves=6, summary="Optimization Center odd/even"), "run_parity")
+
+        feedback = st.session_state.pop(f"simple_parity_feedback_{season}", None)
+        if feedback:
+            _render_move_outcome("success", "Move applied to what-if workspace", feedback, "The calendar and parity counts below now reflect the proposed move.")
+
+        base_games = store.copy_games()
+        state = _conference_nonconf_state(store, base_games, season, conf, int(week))
+        nc = int(state["nonconf_count"])
+        available = int(state["available"])
+        conf_size = int(state["conference_size"])
+
+        if state["is_even"]:
+            _render_move_outcome(
+                "success",
+                f"{conf} · Week {week} is already even",
+                f"{nc} teams are in non-conference games; {available} teams are available for conference play.",
+                "No schedule move is required.",
+            )
+        else:
+            add_nc = nc + 1
+            add_avail = max(0, conf_size - add_nc)
+            remove_nc = max(0, nc - 1)
+            remove_avail = conf_size - remove_nc
+            st.markdown(
+                '<div class="decision-card decision-info" style="margin-top:12px">'
+                '<div class="decision-icon">↔</div><div>'
+                f'<div class="decision-title">{_html_escape(conf)} · Week {week}: {nc} non-conference / {available} available</div>'
+                f'<div class="decision-body">You only need to change one conference team appearance. Either <strong>add one</strong> to reach {add_nc} non-conference / {add_avail} available, or <strong>remove one</strong> to reach {remove_nc} non-conference / {remove_avail} available.</div>'
+                '<div class="decision-detail">Single-game solutions are ranked first. No unrelated national schedule changes are made.</div>'
+                '</div></div>',
+                unsafe_allow_html=True,
+            )
+
+            candidates = _simple_parity_candidates(store, optimizer, season, conf, int(week))
+            add_clean = [x for x in candidates["add"] if x["clean"]]
+            remove_clean = [x for x in candidates["remove"] if x["clean"]]
+            add_show = add_clean[:3] if add_clean else candidates["add"][:3]
+            remove_show = remove_clean[:3] if remove_clean else candidates["remove"][:3]
+
+            left, right = st.columns(2, gap="large")
+            with left:
+                st.markdown(f'<div class="section-kicker">PATH A</div><div class="section-title" style="font-size:1rem">Add 1 non-conference team</div><div class="section-copy">Target: <strong>{add_nc} non-conference / {add_avail} available</strong>. Move one {conf} non-conference game from another week into Week {week}.</div>', unsafe_allow_html=True)
+                if add_show:
+                    for idx, candidate in enumerate(add_show, 1):
+                        _render_simple_parity_option(candidate, season, f"add_parity_{conf}_{week}", idx)
+                else:
+                    _render_move_outcome("conflict", "No one-game add option", "No known game can move directly into this week with both teams free.", "Use the advanced repair path below only if you need this side of the solution.")
+
+            with right:
+                st.markdown(f'<div class="section-kicker">PATH B</div><div class="section-title" style="font-size:1rem">Remove 1 non-conference team</div><div class="section-copy">Target: <strong>{remove_nc} non-conference / {remove_avail} available</strong>. Move one current Week {week} non-conference game to another mutually open week.</div>', unsafe_allow_html=True)
+                if remove_show:
+                    for idx, candidate in enumerate(remove_show, 1):
+                        _render_simple_parity_option(candidate, season, f"remove_parity_{conf}_{week}", idx)
+                else:
+                    _render_move_outcome("conflict", "No one-game remove option", "No current non-conference game has a clean mutually open destination in the known schedule.", "Use the advanced repair path below only if necessary.")
+
+            if not add_clean and not remove_clean:
+                with st.expander("No clean one-game option? Find the smallest repair path"):
+                    st.caption("This is the only point where CP-SAT is allowed to move more than one game. It will minimize the number of changes first.")
+                    _run_and_render(
+                        Intent(action="MAKE_CONFERENCE_EVEN", season=season, target_week=week, conference=conf, max_additional_moves=2, summary="Escalated odd/even repair after no clean single-game option"),
+                        "run_parity_advanced",
+                        "Find smallest repair path",
+                    )
 
     elif report == "Scheduled Games / Move Repair":
         st.markdown('<div class="section-kicker">SCHEDULED GAMES</div><div class="section-copy">Choose a known non-conference game and force it into a new week. The optimizer first attempts the requested move only. It relocates other games only when they are directly displaced or when you explicitly ask to preserve conference parity.</div>', unsafe_allow_html=True)
