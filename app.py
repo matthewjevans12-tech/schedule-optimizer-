@@ -19,6 +19,13 @@ import streamlit as st
 from bs4 import BeautifulSoup
 
 try:
+    from streamlit_sortables import sort_items
+    SORTABLES_AVAILABLE = True
+except Exception:
+    sort_items = None
+    SORTABLES_AVAILABLE = False
+
+try:
     from ortools.sat.python import cp_model
     ORTOOLS_AVAILABLE = True
 except Exception:
@@ -103,6 +110,7 @@ class Solution:
     parity_after: Dict[str, str] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
     explanation: str = ""
+    metadata: Dict[str, object] = field(default_factory=dict)
 
 
 @dataclass
@@ -575,12 +583,12 @@ class NonConferenceOptimizer:
                 if requester.subdivision == "FBS":
                     title = f"Week {week} — {candidate.name} FCS candidate"
                     explanation = (f"{requester.name} and {candidate.name} both have no known dated non-conference game in Week {week} "
-                                   f"of {intent.season}. This is a public-data candidate for an FBS-hosted buy game; confirm actual interest and guarantee terms in Gridiron.")
+                                   f"of {intent.season}. This is a public-data candidate for an FBS-hosted buy game; confirm actual interest and guarantee terms in the authoritative scheduling system.")
                     score = 72
                 else:
                     title = f"Week {week} — {candidate.name} potential FBS host"
                     explanation = (f"{requester.name} and {candidate.name} both have no known dated non-conference game in Week {week} "
-                                   f"of {intent.season}. This makes {candidate.name} a public-data candidate for a guarantee/buy-game opportunity; confirm the FBS school's actual need in Gridiron.")
+                                   f"of {intent.season}. This makes {candidate.name} a public-data candidate for a guarantee/buy-game opportunity; confirm the FBS school's actual need in the authoritative scheduling system.")
                     score = 74 if candidate.is_a4 else 70
                 results.append(Solution(title=title, moves=[], score=score, explanation=explanation))
 
@@ -658,7 +666,7 @@ class NonConferenceOptimizer:
 
 
 class AdvancedNonConferenceOptimizer(NonConferenceOptimizer):
-    """CP-SAT optimization layer for Gridiron.
+    """CP-SAT optimization layer for the College Football Non-Conference Scheduling Optimizer.
 
     The LLM only translates natural language into Intent. This class is the
     scheduling authority. When OR-Tools is available it solves the relevant
@@ -1057,6 +1065,20 @@ class AdvancedNonConferenceOptimizer(NonConferenceOptimizer):
             parity_after=parity_after,
             warnings=warnings,
             explanation=explanation,
+            metadata={
+                "mode": mode,
+                "solver_status": self.last_solver_status,
+                "solver_seconds": round(self.last_solver_seconds, 3),
+                "moves": len(moves),
+                "additional_moves": max(0, len(moves) - 1) if mode == "move" else None,
+                "before_bad_count": before_bad_count,
+                "after_bad_count": after_bad_count,
+                "scope_before_bad": scope_before_bad,
+                "scope_after_bad": scope_after_bad,
+                "scope_conferences": scope_conferences,
+                "scope_weeks": scope_weeks,
+                "status_is_optimal": status == cp_model.OPTIMAL,
+            },
         )]
 
     def solve_move_game(self, intent: Intent) -> List[Solution]:
@@ -1116,10 +1138,10 @@ class AdvancedNonConferenceOptimizer(NonConferenceOptimizer):
         return self.optimize_national(intent)
 
     def optimize_market(self, intent: Intent) -> List[Solution]:
-        """Maximum matching for explicit Gridiron needs.
+        """Maximum matching for explicit scheduling-market needs.
 
         Public FBSchedules data does not contain actual buy/sell intent, so real
-        production market optimization requires Gridiron's needs table. The
+        production market optimization requires the authoritative needs table. The
         demo store exercises this path with explicit needs.
         """
         if intent.season is None or not self.store.needs:
@@ -1187,7 +1209,7 @@ class AdvancedNonConferenceOptimizer(NonConferenceOptimizer):
         return [Solution(
             title=f"{len(selected)} market need{'s' if len(selected) != 1 else ''} matched",
             moves=[], score=min(100.0, 70.0 + len(selected) * 4),
-            explanation="Explicit Gridiron needs matched with CP-SAT: " + "; ".join(lines),
+            explanation="Explicit scheduling needs matched with CP-SAT: " + "; ".join(lines),
         )]
 
 
@@ -1257,7 +1279,7 @@ def parse_with_openai(text: str, team_names: Iterable[str]) -> Intent:
         text={
             "format": {
                 "type": "json_schema",
-                "name": "gridiron_schedule_intent",
+                "name": "cfb_nonc_schedule_intent",
                 "strict": True,
                 "schema": INTENT_SCHEMA,
             }
@@ -1556,7 +1578,7 @@ def _safe_get(url: str, timeout: int = 20, attempts: int = 3) -> str:
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X) AppleWebKit/605.1.15 "
-            "Version/18.0 Mobile/15E148 Safari/604.1 GridironOptimizerMVP/0.2"
+            "Version/18.0 Mobile/15E148 Safari/604.1 CFBNonConferenceOptimizer/0.2"
         )
     }
     last_exc = None
@@ -1873,7 +1895,7 @@ def build_real_store(teams_df: pd.DataFrame, games_df: pd.DataFrame, season: int
         week = int(week)
         if week < 0 or week > 13 or r["home_team"] not in valid_names or r["away_team"] not in valid_names:
             continue
-        games.append(Game(game_id=f"real{season}_{i+1}", season=season, week=week, home_team=str(r["home_team"]), away_team=str(r["away_team"]), moveable=True, locked=False, notes="Public-data MVP assumption: treated as moveable until Gridiron supplies true status."))
+        games.append(Game(game_id=f"real{season}_{i+1}", season=season, week=week, home_team=str(r["home_team"]), away_team=str(r["away_team"]), moveable=True, locked=False, notes="Public-data MVP assumption: treated as moveable until the authoritative scheduling system supplies true status."))
     slots = [Slot(team=t.name, season=season, week=w, status="OPEN", location="ANY") for t in teams for w in range(0, 14)]
     return ScheduleStore(teams, games, slots, needs=[])
 
@@ -2052,8 +2074,244 @@ def render_team_calendar(games_df: pd.DataFrame, teams_df: pd.DataFrame, season:
             )
 
 
+def _workspace_move_key(season: int) -> str:
+    return f"cfb_nonc_workspace_moves_{int(season)}"
+
+
+def _workspace_moves(season: int) -> Dict[str, int]:
+    raw = st.session_state.get(_workspace_move_key(season), {})
+    return {str(k): int(v) for k, v in dict(raw).items()}
+
+
+def _set_workspace_move(season: int, game_id: str, week: int) -> None:
+    moves = _workspace_moves(season)
+    moves[str(game_id)] = int(week)
+    st.session_state[_workspace_move_key(season)] = moves
+
+
+def _clear_workspace_moves(season: int) -> None:
+    st.session_state[_workspace_move_key(season)] = {}
+
+
+def apply_workspace_moves(store: ScheduleStore, year_games: pd.DataFrame, season: int) -> pd.DataFrame:
+    """Apply interactive what-if moves to the in-memory workspace only.
+
+    This never changes the scraped/public source data. It lets the user drag a
+    game on the board, then see that proposed state reflected in calendars,
+    parity, and subsequent optimization requests for the current session.
+    """
+    overrides = _workspace_moves(season)
+    if not overrides:
+        return year_games.copy()
+    for game_id, target_week in overrides.items():
+        game = store.games.get(game_id)
+        if game is not None and int(game.week) != int(target_week):
+            store.games[game_id] = replace(game, week=int(target_week))
+    df = year_games.copy()
+    if "game_id" not in df.columns:
+        return df
+    for game_id, target_week in overrides.items():
+        mask = df["game_id"].astype(str) == str(game_id)
+        if not mask.any():
+            continue
+        df.loc[mask, "week"] = int(target_week)
+        if "date" in df.columns:
+            df.loc[mask, "date"] = _week_saturday(season, int(target_week)).isoformat()
+        df.loc[mask, "workspace_moved"] = True
+    return df
+
+
+def _find_conflicting_games(store: ScheduleStore, game: Game, target_week: int) -> List[Game]:
+    conflicts: List[Game] = []
+    for team in (game.home_team, game.away_team):
+        other = store.game_for_team_week(store.copy_games(), team, game.season, int(target_week), exclude_game_id=game.game_id)
+        if other is not None and all(other.game_id != g.game_id for g in conflicts):
+            conflicts.append(other)
+    return conflicts
+
+
+def _direct_move_assessment(store: ScheduleStore, game: Game, target_week: int) -> Dict[str, object]:
+    target_week = int(target_week)
+    if target_week == int(game.week):
+        return {"status": "current", "clean": True, "conflicts": [], "message": "Current week"}
+    if target_week < 0 or target_week > 13:
+        return {"status": "blocked", "clean": False, "conflicts": [], "message": "Outside the regular-season week range"}
+    if not store.slot_allows_game(game.home_team, game.season, target_week) or not store.slot_allows_game(game.away_team, game.season, target_week):
+        return {"status": "blocked", "clean": False, "conflicts": [], "message": "One or both teams are blocked on this week"}
+    conflicts = _find_conflicting_games(store, game, target_week)
+    if conflicts:
+        names = ", ".join(f"{g.away_team} @ {g.home_team}" for g in conflicts)
+        return {"status": "conflict", "clean": False, "conflicts": conflicts, "message": f"Conflict with {names}"}
+    return {"status": "clean", "clean": True, "conflicts": [], "message": "Both teams are available"}
+
+
+def _sortable_game_token(game: Game) -> str:
+    # Only one game is draggable at a time, so the visible matchup can safely
+    # serve as the unique sortable item id without exposing internal IDs.
+    return f"{game.away_team} @ {game.home_team}"
+
+
+
+def _render_move_outcome(kind: str, title: str, body: str, detail: str = "") -> None:
+    icon = {"success": "✓", "conflict": "!", "info": "i"}.get(kind, "i")
+    detail_html = f'<div class="decision-detail">{_html_escape(detail)}</div>' if detail else ""
+    st.markdown(
+        f'<div class="decision-card decision-{kind}"><div class="decision-icon">{icon}</div>'
+        f'<div><div class="decision-title">{_html_escape(title)}</div><div class="decision-body">{_html_escape(body)}</div>{detail_html}</div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_drag_move_lab(
+    store: ScheduleStore,
+    optimizer: AdvancedNonConferenceOptimizer,
+    season: int,
+    selected_team: str,
+) -> None:
+    """Interactive drag-and-drop move lab for one team's non-conference games.
+
+    The user selects a game, then drags that single game across week containers.
+    Because only one game is active at a time, each target week can be colored
+    ahead of time: green = clean move, red = direct conflict, blue = current.
+    Invalid drops snap back and trigger the minimal CP-SAT repair path.
+    """
+    st.markdown(
+        '<div class="board-header"><div><div class="section-kicker" style="margin-top:0">INTERACTIVE MOVE LAB</div>'
+        '<div class="section-title" style="font-size:1.05rem">Drag a game to test a new week</div>'
+        '<div class="section-copy" style="margin-bottom:0">Green weeks are clean direct moves. Red weeks are blocked by another known game. A blocked drop snaps back and the optimizer calculates the minimum-change path to make it work.</div>'
+        '</div><div class="board-legend"><span class="legend-dot legend-current"></span>Current <span class="legend-dot legend-clean"></span>Clean <span class="legend-dot legend-conflict"></span>Conflict</div></div>',
+        unsafe_allow_html=True,
+    )
+
+    team_games = sorted(
+        [g for g in store.games.values() if g.season == season and g.involves(selected_team)],
+        key=lambda g: (g.week, g.home_team, g.away_team),
+    )
+    if not team_games:
+        st.info("No dated non-conference games are loaded for this team.")
+        return
+    labels = {f"W{g.week} · {g.away_team} @ {g.home_team}": g for g in team_games}
+    game_label = st.selectbox("Game to move", list(labels), key=f"drag_game_{season}_{selected_team}")
+    game = labels[game_label]
+    assessments = {w: _direct_move_assessment(store, game, w) for w in range(14)}
+
+    # Build one draggable game card across fourteen week containers.
+    token = _sortable_game_token(game)
+    containers = []
+    for week in range(14):
+        sat = _week_saturday(season, week).strftime("%b %d").replace(" 0", " ")
+        containers.append({"header": f"W{week} · {sat}", "items": [token] if week == game.week else []})
+
+    if SORTABLES_AVAILABLE:
+        css = [
+            ".sortable-component{display:grid!important;grid-template-columns:repeat(7,minmax(122px,1fr));gap:8px;background:transparent!important;padding:2px!important}",
+            ".sortable-container{min-height:105px!important;background:#0b1726!important;border:1px solid #25344a!important;border-radius:12px!important;overflow:hidden!important}",
+            ".sortable-container-header{font-size:10px!important;font-weight:800!important;letter-spacing:.02em!important;color:#91a0b4!important;background:#0f1d2d!important;padding:9px 8px!important;border-bottom:1px solid #24334a!important}",
+            ".sortable-container-body{min-height:62px!important;padding:7px!important}",
+            ".sortable-item{font-size:10px!important;line-height:1.25!important;background:#17263a!important;color:#eef3f8!important;border:1px solid #36506f!important;border-radius:9px!important;padding:9px!important;cursor:grab!important;box-shadow:none!important}",
+            ".sortable-item:hover{background:#1b2d45!important}",
+        ]
+        for week in range(14):
+            a = assessments[week]
+            nth = week + 1
+            if week == game.week:
+                css.append(f".sortable-container:nth-child({nth}){{border-color:#4f8cff!important;box-shadow:inset 0 0 0 1px rgba(79,140,255,.18)!important}}")
+                css.append(f".sortable-container:nth-child({nth}) .sortable-container-header{{color:#8ab7ff!important;background:rgba(79,140,255,.10)!important}}")
+            elif a.get("clean"):
+                css.append(f".sortable-container:nth-child({nth}){{border-color:rgba(52,199,133,.48)!important}}")
+                css.append(f".sortable-container:nth-child({nth}) .sortable-container-header{{color:#6ee0ad!important;background:rgba(52,199,133,.08)!important}}")
+            else:
+                css.append(f".sortable-container:nth-child({nth}){{border-color:rgba(239,91,103,.42)!important}}")
+                css.append(f".sortable-container:nth-child({nth}) .sortable-container-header{{color:#ff8c96!important;background:rgba(239,91,103,.08)!important}}")
+        sorted_containers = sort_items(
+            containers,
+            multi_containers=True,
+            direction="horizontal",
+            custom_style="\n".join(css),
+            key=f"move_board_{season}_{game.game_id}_{game.week}_{st.session_state.get(f'move_board_nonce_{season}', 0)}",
+        )
+        target_week = game.week
+        for week, container in enumerate(sorted_containers or []):
+            if token in container.get("items", []):
+                target_week = week
+                break
+        if int(target_week) != int(game.week):
+            assessment = assessments[int(target_week)]
+            if assessment.get("clean"):
+                old_week = int(game.week)
+                _set_workspace_move(season, game.game_id, int(target_week))
+                st.session_state[f"move_feedback_{season}"] = {
+                    "kind": "success",
+                    "title": "Move accepted",
+                    "body": f"{game.away_team} @ {game.home_team} moved from Week {old_week} to Week {int(target_week)}.",
+                    "detail": "Both teams are clear on the target week. No additional game changes are required.",
+                }
+                st.rerun()
+            else:
+                intent = Intent(
+                    action="MOVE_GAME",
+                    season=season,
+                    target_week=int(target_week),
+                    team_a=game.home_team,
+                    team_b=game.away_team,
+                    preserve_fbs_conference_parity=False,
+                    max_additional_moves=8,
+                    summary="Drag-and-drop conflict repair",
+                )
+                solutions = optimizer.solve(intent)
+                st.session_state[f"move_feedback_{season}"] = {
+                    "kind": "conflict",
+                    "title": "Move blocked",
+                    "body": f"{game.away_team} @ {game.home_team} cannot move directly to Week {int(target_week)}.",
+                    "detail": str(assessment.get("message", "A scheduling conflict exists.")),
+                    "solutions": solutions,
+                    "requested_week": int(target_week),
+                    "game_id": game.game_id,
+                }
+                # Force the component to remount in its original position.
+                st.session_state[f"move_board_nonce_{season}"] = st.session_state.get(f"move_board_nonce_{season}", 0) + 1
+                st.rerun()
+    else:
+        st.info("Drag-and-drop requires the streamlit-sortables package. The deployment requirements file in this update includes it.")
+
+    # Accessible/non-drag alternative.
+    with st.expander("Move with controls instead"):
+        target = st.selectbox("Target week", list(range(14)), index=int(game.week), key=f"manual_target_{season}_{game.game_id}")
+        a = assessments[int(target)]
+        status = "Clean move" if a.get("clean") else "Conflict"
+        st.caption(f"{status}: {a.get('message', '')}")
+        if st.button("Evaluate move", key=f"manual_eval_{season}_{game.game_id}", use_container_width=True):
+            if int(target) == int(game.week):
+                st.info("That game is already in the selected week.")
+            elif a.get("clean"):
+                _set_workspace_move(season, game.game_id, int(target))
+                st.session_state[f"move_feedback_{season}"] = {
+                    "kind": "success", "title": "Move accepted",
+                    "body": f"{game.away_team} @ {game.home_team} moved to Week {int(target)}.",
+                    "detail": "No direct team/week conflict was found.",
+                }
+                st.rerun()
+            else:
+                solutions = optimizer.solve(Intent(action="MOVE_GAME", season=season, target_week=int(target), team_a=game.home_team, team_b=game.away_team, preserve_fbs_conference_parity=False, max_additional_moves=8))
+                st.session_state[f"move_feedback_{season}"] = {
+                    "kind": "conflict", "title": "Move blocked",
+                    "body": f"{game.away_team} @ {game.home_team} cannot move directly to Week {int(target)}.",
+                    "detail": str(a.get("message", "A scheduling conflict exists.")), "solutions": solutions,
+                }
+                st.rerun()
+
+    feedback = st.session_state.pop(f"move_feedback_{season}", None)
+    if feedback:
+        _render_move_outcome(feedback.get("kind", "info"), feedback.get("title", "Move evaluated"), feedback.get("body", ""), feedback.get("detail", ""))
+        sols = feedback.get("solutions") or []
+        if sols:
+            st.markdown('<div class="section-kicker">MINIMUM-CHANGE PATH</div>', unsafe_allow_html=True)
+            render_solution(sols[0], 1)
+
+
+
 st.set_page_config(
-    page_title="Gridiron Optimizer",
+    page_title="College Football Non-Conference Scheduling Optimizer",
     page_icon="🏈",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -2062,110 +2320,125 @@ st.set_page_config(
 st.markdown(r"""
 <style>
 :root{
-  --g-bg:#07101d;
-  --g-panel:#0d1827;
-  --g-panel-2:#111f31;
-  --g-border:rgba(255,255,255,.09);
-  --g-text:#f5f7fb;
-  --g-muted:#91a0b4;
-  --g-gold:#d6aa54;
-  --g-green:#38c98b;
-  --g-red:#ef6a73;
-  --g-blue:#64a8ff;
+  --g-bg:#07111f;
+  --g-bg2:#091522;
+  --g-surface:#0d1a2a;
+  --g-surface2:#122238;
+  --g-surface3:#162940;
+  --g-border:#21344d;
+  --g-border-soft:rgba(163,187,214,.14);
+  --g-text:#f5f8fc;
+  --g-muted:#91a3b8;
+  --g-muted2:#667a91;
+  --g-blue:#4f8cff;
+  --g-blue2:#7aabff;
+  --g-green:#34c785;
+  --g-red:#ef5b67;
+  --g-amber:#e6b85c;
+  --g-cyan:#4dcbd7;
+  --g-shadow:0 18px 55px rgba(0,0,0,.24);
 }
 html,body,[class*="css"]{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
-.stApp{background:linear-gradient(180deg,#07101d 0%,#091321 55%,#07101d 100%);color:var(--g-text)}
-.block-container{max-width:1500px;padding-top:1.4rem;padding-bottom:4rem}
-header[data-testid="stHeader"]{background:rgba(7,16,29,.82);backdrop-filter:blur(12px)}
-footer{visibility:hidden}
-[data-testid="stSidebar"]{background:#0a1422;border-right:1px solid var(--g-border)}
-[data-testid="stSidebar"] .block-container{padding-top:1rem}
+.stApp{background:linear-gradient(180deg,#07111f 0%,#08131f 45%,#07111f 100%);color:var(--g-text)}
+.block-container{max-width:1580px;padding-top:1rem;padding-bottom:4rem}
+header[data-testid="stHeader"]{background:rgba(7,17,31,.86);backdrop-filter:blur(16px);border-bottom:1px solid rgba(255,255,255,.04)}
+footer,#MainMenu{visibility:hidden}
+[data-testid="stSidebar"]{background:#081421;border-right:1px solid var(--g-border-soft)}
 
-/* Streamlit controls */
-.stSelectbox label,.stRadio label,.stTextInput label{font-size:.78rem!important;color:var(--g-muted)!important;font-weight:700!important;letter-spacing:.02em}
-[data-baseweb="select"]>div,[data-baseweb="input"]{background:#0c1725!important;border-color:var(--g-border)!important;border-radius:10px!important}
-.stTabs [data-baseweb="tab-list"]{gap:1.25rem;border-bottom:1px solid var(--g-border)}
-.stTabs [data-baseweb="tab"]{height:44px;padding:0 2px;color:#9ca9bb;font-weight:650;background:transparent}
-.stTabs [aria-selected="true"]{color:#fff!important}
-.stTabs [data-baseweb="tab-highlight"]{background:var(--g-gold)!important;height:2px!important}
-.stChatInputContainer>div{background:#0d1827!important;border:1px solid var(--g-border)!important;border-radius:14px!important}
+/* Controls */
+.stSelectbox label,.stRadio label,.stTextInput label,.stSlider label{font-size:.72rem!important;color:var(--g-muted)!important;font-weight:760!important;letter-spacing:.025em!important}
+[data-baseweb="select"]>div,[data-baseweb="input"],textarea{background:#0d1a2a!important;border:1px solid #243750!important;border-radius:10px!important;min-height:44px!important}
+.stButton>button{min-height:43px;border-radius:10px!important;font-weight:760!important;letter-spacing:.01em!important;border:1px solid #2b405a!important}
+.stButton>button[kind="primary"]{background:linear-gradient(180deg,#4f8cff,#3f78df)!important;border-color:#5b96ff!important;color:white!important;box-shadow:0 9px 22px rgba(79,140,255,.18)}
+.stButton>button:hover{border-color:#56769c!important}
+.stTabs [data-baseweb="tab-list"]{gap:.35rem;border:1px solid var(--g-border-soft);background:#0a1624;border-radius:12px;padding:4px;margin-bottom:16px;overflow-x:auto}
+.stTabs [data-baseweb="tab"]{height:38px;padding:0 14px;color:#8ea0b5;font-weight:720;background:transparent;border-radius:8px;white-space:nowrap}
+.stTabs [aria-selected="true"]{color:#fff!important;background:#15263a!important}
+.stTabs [data-baseweb="tab-highlight"]{display:none!important}
+.stChatInputContainer>div{background:#0d1a2a!important;border:1px solid #2a3d56!important;border-radius:14px!important;box-shadow:0 10px 30px rgba(0,0,0,.16)}
 [data-testid="stChatMessage"]{background:transparent;border:0;padding:.35rem 0}
-[data-testid="stExpander"]{background:#0d1827;border:1px solid var(--g-border);border-radius:12px}
-[data-testid="stDataFrame"]{border:1px solid var(--g-border);border-radius:12px;overflow:hidden}
-.stAlert{border-radius:12px;border:1px solid var(--g-border)}
+[data-testid="stExpander"]{background:#0d1a2a;border:1px solid var(--g-border-soft);border-radius:12px;overflow:hidden}
+[data-testid="stDataFrame"]{border:1px solid var(--g-border-soft);border-radius:12px;overflow:hidden}
+.stAlert{border-radius:11px;border:1px solid var(--g-border-soft)}
 
-/* Brand/header */
-.brand-row{display:flex;align-items:center;justify-content:space-between;gap:20px;margin:0 0 1rem 0}
-.brand-lockup{display:flex;align-items:center;gap:14px;min-width:0}
-.brand-mark{width:46px;height:46px;border-radius:13px;background:linear-gradient(145deg,#d6aa54,#8d6728);display:flex;align-items:center;justify-content:center;color:#07101d;font-weight:950;font-size:22px;box-shadow:0 10px 30px rgba(214,170,84,.18)}
-.brand-name{font-weight:850;letter-spacing:.05em;font-size:1.35rem;color:#fff;line-height:1}
-.brand-sub{color:var(--g-muted);font-size:.82rem;margin-top:5px}
-.brand-status{display:flex;align-items:center;gap:7px;color:#a9b6c8;font-size:.78rem;white-space:nowrap}
-.status-dot{width:8px;height:8px;border-radius:50%;background:var(--g-green);box-shadow:0 0 0 4px rgba(56,201,139,.09)}
+/* Enterprise masthead */
+.brand-row{display:flex;align-items:center;justify-content:space-between;gap:18px;margin:0 0 10px}
+.brand-lockup{display:flex;align-items:center;gap:11px;min-width:0}
+.brand-mark{width:38px;height:38px;border-radius:9px;background:linear-gradient(145deg,#52a96f,#2d6f48);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:950;font-size:18px;box-shadow:0 8px 22px rgba(52,199,133,.12)}
+.brand-name{font-weight:900;letter-spacing:.075em;font-size:1.05rem;color:#fff;line-height:1}
+.brand-sub{color:#6f8299;font-size:.68rem;margin-top:4px;font-weight:620}
+.brand-status{display:flex;align-items:center;gap:8px;color:#9bb0c6;font-size:.72rem;white-space:nowrap;border:1px solid var(--g-border-soft);background:#0c1928;border-radius:999px;padding:7px 10px}
+.status-dot{width:7px;height:7px;border-radius:50%;background:var(--g-green);box-shadow:0 0 0 4px rgba(52,199,133,.09)}
 
-.hero{background:radial-gradient(circle at 85% 15%,rgba(214,170,84,.11),transparent 31%),linear-gradient(135deg,#0e1b2b,#0a1523);border:1px solid var(--g-border);border-radius:18px;padding:20px 22px;margin-bottom:16px;display:flex;align-items:flex-end;justify-content:space-between;gap:20px}
-.hero-kicker{font-size:.72rem;letter-spacing:.13em;color:var(--g-gold);font-weight:800;margin-bottom:7px}
-.hero-title{font-size:1.55rem;font-weight:820;letter-spacing:-.02em;line-height:1.15;color:#fff}
-.hero-copy{font-size:.84rem;color:var(--g-muted);margin-top:7px;max-width:720px;line-height:1.5}
+.hero{background:linear-gradient(135deg,#101f32 0%,#0c1929 68%,#102137 100%);border:1px solid #233750;border-radius:14px;padding:17px 18px;margin-bottom:13px;display:flex;align-items:center;justify-content:space-between;gap:20px;box-shadow:0 16px 46px rgba(0,0,0,.13)}
+.hero-kicker{font-size:.61rem;letter-spacing:.16em;color:#7fa8da;font-weight:850;margin-bottom:6px}
+.hero-title{font-size:1.36rem;font-weight:850;letter-spacing:-.025em;line-height:1.12;color:#fff}
+.hero-copy{font-size:.77rem;color:#8fa3b9;margin-top:6px;max-width:820px;line-height:1.45}
 
-.control-shell{border:1px solid var(--g-border);background:rgba(13,24,39,.7);border-radius:14px;padding:10px 14px 2px;margin-bottom:14px}
-.metric-strip{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;margin:8px 0 16px}
-.metric-card{border:1px solid var(--g-border);background:#0b1624;border-radius:12px;padding:11px 13px}
-.metric-label{font-size:.66rem;color:#7f8ea2;font-weight:800;letter-spacing:.08em;text-transform:uppercase}
-.metric-value{font-size:1.05rem;color:#fff;font-weight:760;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.metric-sub{font-size:.68rem;color:#708096;margin-top:2px}
-
-.section-kicker{font-size:.68rem;letter-spacing:.12em;font-weight:850;color:var(--g-gold);margin:18px 0 7px}
-.section-title{font-size:1.35rem;font-weight:800;color:#fff;letter-spacing:-.015em}
-.section-copy{font-size:.8rem;color:var(--g-muted);line-height:1.5;margin:4px 0 14px}
+.metric-strip{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:8px 0 14px}
+.metric-card{border:1px solid var(--g-border-soft);background:linear-gradient(180deg,#0e1b2b,#0b1725);border-radius:11px;padding:10px 12px;min-width:0}
+.metric-label{font-size:.58rem;color:#71869d;font-weight:850;letter-spacing:.12em;text-transform:uppercase}
+.metric-value{font-size:.98rem;color:#fff;font-weight:820;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.metric-sub{font-size:.64rem;color:#657990;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.section-kicker{font-size:.61rem;letter-spacing:.14em;font-weight:880;color:#7698bf;margin:17px 0 6px;text-transform:uppercase}
+.section-title{font-size:1.23rem;font-weight:840;color:#fff;letter-spacing:-.02em}
+.section-copy{font-size:.76rem;color:#899db3;line-height:1.48;margin:4px 0 13px;max-width:980px}
 
 /* Conference calendar */
-.calendar-shell{border:1px solid var(--g-border);border-radius:16px;overflow:hidden;background:#0a1421}
+.calendar-shell{border:1px solid #20334c;border-radius:13px;overflow:hidden;background:#091522;box-shadow:0 13px 40px rgba(0,0,0,.12)}
 .calendar-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
-.gc{border-collapse:separate;border-spacing:0;min-width:1370px;width:100%;font-size:11px}
-.gc th,.gc td{border-right:1px solid var(--g-border);border-bottom:1px solid var(--g-border);text-align:center;vertical-align:middle}
-.gc thead th{position:sticky;top:0;z-index:4;background:#101c2b;padding:9px 4px;min-width:80px}
-.gc .school{position:sticky;left:0;z-index:5;background:#0d1827;min-width:165px;width:165px;text-align:left;padding:8px 10px}
-.gc .school-head{background:#101c2b!important;color:#7f8da0;font-size:9px;letter-spacing:.11em}
-.gc tr:hover .school,.gc tr:hover td{background-color:#101d2c}
-.school-line{display:flex;align-items:center;gap:9px;font-size:11px;font-weight:730;color:#edf2f8;white-space:nowrap}
+.gc{border-collapse:separate;border-spacing:0;min-width:1410px;width:100%;font-size:10px}
+.gc th,.gc td{border-right:1px solid rgba(148,172,199,.11);border-bottom:1px solid rgba(148,172,199,.11);text-align:center;vertical-align:middle}
+.gc thead th{position:sticky;top:0;z-index:4;background:#101f31;padding:9px 4px;min-width:82px}
+.gc .school{position:sticky;left:0;z-index:5;background:#0d1a2a;min-width:172px;width:172px;text-align:left;padding:8px 10px}
+.gc .school-head{background:#101f31!important;color:#71869d;font-size:8px;letter-spacing:.13em}
+.gc tr:hover .school,.gc tr:hover td{background-color:#112237}
+.school-line{display:flex;align-items:center;gap:9px;font-size:10px;font-weight:760;color:#edf3f9;white-space:nowrap}
 .team-logo{object-fit:contain;display:block;flex:0 0 auto}
-.logo-fallback{display:flex;border:1px solid rgba(255,255,255,.15);border-radius:50%;align-items:center;justify-content:center;color:#9faec1;font-size:10px;font-weight:800;flex:0 0 auto;background:#111f30}
-.week-label{display:block;color:#fff;font-size:10px;font-weight:820}.week-date{display:block;color:#738297;font-size:9px;margin-top:2px;font-weight:600}
-.gc td{padding:5px 4px;height:80px;min-width:80px;background:#0a1421}
-.gc td.empty{color:#334154;font-size:17px}.open-dot{opacity:.5}
-.game-tile{min-height:68px;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:4px 2px;border-radius:9px}
-.opp{font-weight:750;color:#f2f5f9;font-size:10px;line-height:1.1;margin-top:1px;max-width:74px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.mini-meta{display:flex;gap:4px;align-items:center;font-size:8px;color:#77869a;margin-top:3px}
-.mini-site{font-weight:850;padding:1px 4px;border-radius:4px}.site-h{color:#56d19a}.site-a{color:#72b5ff}.site-n{color:#e2bb71}
+.logo-fallback{display:flex;border:1px solid rgba(255,255,255,.14);border-radius:50%;align-items:center;justify-content:center;color:#9fb0c3;font-size:9px;font-weight:820;flex:0 0 auto;background:#14243a}
+.week-label{display:block;color:#fff;font-size:9px;font-weight:860}.week-date{display:block;color:#71849a;font-size:8px;margin-top:2px;font-weight:650}
+.gc td{padding:5px 4px;height:78px;min-width:82px;background:#091522}
+.gc td.empty{color:#2d3e54;font-size:15px}.open-dot{opacity:.55}
+.game-tile{min-height:66px;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:4px 2px;border-radius:8px}
+.opp{font-weight:760;color:#f1f5f9;font-size:9px;line-height:1.08;margin-top:2px;max-width:75px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mini-meta{display:flex;gap:4px;align-items:center;font-size:7px;color:#75889f;margin-top:3px}.mini-site{font-weight:900;padding:1px 4px;border-radius:4px}.site-h{color:#59d49b}.site-a{color:#74adff}.site-n{color:#e6bc6f}
 
 /* Team calendar */
-.team-hero{display:flex;align-items:center;gap:16px;padding:16px 18px;border:1px solid var(--g-border);border-radius:15px;background:linear-gradient(135deg,#0e1a29,#0a1421);margin-bottom:12px}
-.team-hero .logo-fallback{display:flex}.team-hero-name{font-size:1.35rem;font-weight:820;color:#fff}.team-hero-meta{font-size:.78rem;color:var(--g-muted);margin-top:3px}
-.tc-grid{display:grid;grid-template-columns:repeat(5,minmax(150px,1fr));gap:9px;margin-top:.5rem}
-.tc-card{border:1px solid var(--g-border);border-radius:14px;padding:11px 12px;min-height:170px;text-align:center;background:linear-gradient(180deg,#0e1a29,#0b1522);display:flex;flex-direction:column;align-items:center;justify-content:flex-start}
-.tc-card.is-open{background:#09131f;border-style:dashed;opacity:.82}
-.tc-card-top{width:100%;display:flex;justify-content:space-between;color:#718096;font-size:9px;font-weight:800;letter-spacing:.05em;margin-bottom:13px}
-.tc-logo{height:60px;display:flex;align-items:center;justify-content:center}.tc-logo .logo-fallback{display:flex}
-.tc-opp{font-size:13px;font-weight:800;color:#fff;line-height:1.15;margin-top:4px}.tc-date-detail{font-size:10px;color:#8796aa;margin:4px 0 7px}.site-badge{font-size:8px;font-weight:850;letter-spacing:.06em;padding:3px 7px;border-radius:999px;border:1px solid currentColor}.tc-empty-icon{color:#3d4d61;font-size:22px;margin-top:18px}.tc-open{font-size:10px;color:#708095;font-weight:700;margin-top:6px}.tc-open-sub{font-size:9px;color:#4e5d6f;margin-top:3px}
-.tba-row{display:flex;align-items:center;gap:11px;border:1px solid var(--g-border);background:#0c1725;border-radius:11px;padding:9px 12px;margin:6px 0;color:#f1f4f8}.tba-row span{font-size:11px;color:#7f8da0}.tba-row .logo-fallback{display:flex}
+.team-hero{display:flex;align-items:center;gap:15px;padding:14px 16px;border:1px solid var(--g-border-soft);border-radius:13px;background:linear-gradient(135deg,#0f1e30,#0b1725);margin-bottom:11px}
+.team-hero-name{font-size:1.22rem;font-weight:850;color:#fff}.team-hero-meta{font-size:.72rem;color:#8498ae;margin-top:3px}
+.tc-grid{display:grid;grid-template-columns:repeat(5,minmax(145px,1fr));gap:8px;margin-top:.5rem}
+.tc-card{border:1px solid var(--g-border-soft);border-radius:12px;padding:10px 11px;min-height:158px;text-align:center;background:linear-gradient(180deg,#0f1e2f,#0b1725);display:flex;flex-direction:column;align-items:center;justify-content:flex-start}
+.tc-card.is-open{background:#091522;border-style:dashed;opacity:.78}
+.tc-card-top{width:100%;display:flex;justify-content:space-between;color:#70849b;font-size:8px;font-weight:850;letter-spacing:.05em;margin-bottom:11px}
+.tc-logo{height:56px;display:flex;align-items:center;justify-content:center}.tc-opp{font-size:12px;font-weight:820;color:#fff;line-height:1.12;margin-top:4px}.tc-date-detail{font-size:9px;color:#8195ab;margin:4px 0 7px}
+.site-badge{font-size:7px;font-weight:900;letter-spacing:.07em;padding:3px 7px;border-radius:999px;border:1px solid currentColor}.tc-empty-icon{color:#34475e;font-size:21px;margin-top:16px}.tc-open{font-size:9px;color:#70849b;font-weight:720;margin-top:6px}.tc-open-sub{font-size:8px;color:#4e6279;margin-top:3px}
+.tba-row{display:flex;align-items:center;gap:10px;border:1px solid var(--g-border-soft);background:#0c1928;border-radius:10px;padding:9px 11px;margin:6px 0;color:#f1f5fa}.tba-row span{font-size:10px;color:#7d90a6}
 
-/* Solution cards */
-.solution-head{display:flex;justify-content:space-between;align-items:center;gap:12px}.score-pill{border-radius:999px;padding:4px 8px;background:rgba(56,201,139,.1);color:#58d49f;font-size:.7rem;font-weight:800}
+/* Decision / result system */
+.decision-card{display:grid;grid-template-columns:34px 1fr;gap:11px;align-items:flex-start;border-radius:12px;padding:12px 13px;margin:9px 0;border:1px solid var(--g-border-soft);background:#0d1a2a}
+.decision-icon{width:30px;height:30px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:950;font-size:15px}
+.decision-title{font-size:.84rem;font-weight:840;color:#fff}.decision-body{font-size:.74rem;color:#9aadc1;line-height:1.45;margin-top:2px}.decision-detail{font-size:.68rem;color:#6f849b;margin-top:4px}
+.decision-success{border-color:rgba(52,199,133,.32);background:linear-gradient(90deg,rgba(52,199,133,.08),#0d1a2a 32%)}.decision-success .decision-icon{background:rgba(52,199,133,.13);color:#59dda2}
+.decision-conflict{border-color:rgba(239,91,103,.35);background:linear-gradient(90deg,rgba(239,91,103,.09),#0d1a2a 32%)}.decision-conflict .decision-icon{background:rgba(239,91,103,.13);color:#ff8e98}
+.decision-info{border-color:rgba(79,140,255,.3);background:linear-gradient(90deg,rgba(79,140,255,.08),#0d1a2a 32%)}.decision-info .decision-icon{background:rgba(79,140,255,.12);color:#86b2ff}
+.board-header{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;padding:13px 14px;border:1px solid var(--g-border-soft);background:#0c1928;border-radius:12px;margin:14px 0 9px}
+.board-legend{display:flex;align-items:center;gap:6px;color:#778ca2;font-size:.66rem;white-space:nowrap}.legend-dot{width:7px;height:7px;border-radius:50%;display:inline-block;margin-left:6px}.legend-current{background:var(--g-blue)}.legend-clean{background:var(--g-green)}.legend-conflict{background:var(--g-red)}
 
-@media(max-width:1000px){
-  .block-container{padding-left:1rem;padding-right:1rem}
-  .metric-strip{grid-template-columns:repeat(2,minmax(0,1fr))}
-  .tc-grid{grid-template-columns:repeat(3,minmax(145px,1fr))}
-  .brand-status{display:none}
-}
-@media(max-width:640px){
-  .hero{padding:16px;align-items:flex-start;flex-direction:column}
-  .hero-title{font-size:1.3rem}
-  .metric-strip{grid-template-columns:1fr 1fr}
-  .tc-grid{grid-template-columns:repeat(2,minmax(130px,1fr))}
-  .gc .school{min-width:140px;width:140px}
-}
+.result-card{border:1px solid #22364f;border-radius:13px;background:linear-gradient(180deg,#0f1c2c,#0a1624);overflow:hidden;margin:10px 0 14px;box-shadow:0 12px 34px rgba(0,0,0,.12)}
+.result-top{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 14px;border-bottom:1px solid var(--g-border-soft)}
+.result-rank{font-size:.66rem;color:#71869d;font-weight:850;letter-spacing:.09em}.result-title{font-size:.94rem;font-weight:850;color:#fff;margin-top:2px}.result-score{display:flex;align-items:center;justify-content:center;min-width:58px;height:32px;border-radius:999px;background:rgba(52,199,133,.11);border:1px solid rgba(52,199,133,.25);color:#69dfa9;font-weight:900;font-size:.76rem}
+.result-summary{padding:12px 14px;color:#91a5bb;font-size:.75rem;line-height:1.47;border-bottom:1px solid var(--g-border-soft)}
+.result-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:0;border-bottom:1px solid var(--g-border-soft)}
+.result-kpi{padding:10px 13px;border-right:1px solid var(--g-border-soft)}.result-kpi:last-child{border-right:0}.result-kpi-label{font-size:.56rem;color:#677d94;letter-spacing:.11em;font-weight:880}.result-kpi-value{font-size:.82rem;color:#eef4fa;font-weight:810;margin-top:3px}
+.move-table{width:100%;border-collapse:collapse;font-size:.72rem}.move-table th{color:#71869d;font-size:.57rem;letter-spacing:.1em;text-align:left;padding:9px 13px;background:#0b1725}.move-table td{padding:10px 13px;border-top:1px solid var(--g-border-soft);color:#dfe7ef}.move-table td:nth-child(2),.move-table td:nth-child(3){white-space:nowrap}.move-arrow{color:#70869e;padding:0 6px}
+.result-note{display:flex;gap:9px;align-items:flex-start;padding:10px 13px;border-top:1px solid var(--g-border-soft);color:#7f93aa;font-size:.67rem;line-height:1.4}.result-note strong{color:#a8b9ca}
+.parity-impact{padding:11px 13px;border-top:1px solid var(--g-border-soft)}.parity-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;margin-top:7px}.parity-row{display:grid;grid-template-columns:105px 1fr 18px 1fr;align-items:center;gap:7px;border:1px solid var(--g-border-soft);border-radius:9px;background:#0a1624;padding:8px 9px;font-size:.65rem}.parity-key{font-weight:800;color:#bdcad7}.parity-old{color:#8194a9}.parity-new{color:#c8d5e2}.parity-arrow{color:#536a83;text-align:center}
+
+/* Compact pills */
+.status-chip{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:5px 8px;font-size:.62rem;font-weight:820;border:1px solid var(--g-border-soft);background:#0b1725;color:#a0b1c3}.status-chip.good{color:#62dca4;border-color:rgba(52,199,133,.24);background:rgba(52,199,133,.07)}.status-chip.bad{color:#ff8e98;border-color:rgba(239,91,103,.24);background:rgba(239,91,103,.07)}.status-chip.neutral{color:#8fb8ff;border-color:rgba(79,140,255,.24);background:rgba(79,140,255,.07)}
+
+@media(max-width:1050px){.block-container{padding-left:.85rem;padding-right:.85rem}.metric-strip{grid-template-columns:repeat(2,minmax(0,1fr))}.tc-grid{grid-template-columns:repeat(3,minmax(140px,1fr))}.result-kpis{grid-template-columns:1fr 1fr}.parity-list{grid-template-columns:1fr}.brand-status{display:none}.board-header{align-items:flex-start;flex-direction:column}}
+@media(max-width:640px){.hero{padding:14px;align-items:flex-start;flex-direction:column}.hero-title{font-size:1.2rem}.metric-strip{grid-template-columns:1fr 1fr}.tc-grid{grid-template-columns:repeat(2,minmax(128px,1fr))}.gc .school{min-width:140px;width:140px}.result-kpis{grid-template-columns:1fr 1fr}.board-legend{white-space:normal;flex-wrap:wrap}}
 </style>
 """, unsafe_allow_html=True)
 
@@ -2173,7 +2446,7 @@ footer{visibility:hidden}
 st.markdown(
     '<div class="brand-row">'
     '<div class="brand-lockup"><div class="brand-mark">G</div><div>'
-    '<div class="brand-name">GRIDIRON</div><div class="brand-sub">Non-Conference Scheduling Intelligence</div>'
+    '<div class="brand-name">COLLEGE FOOTBALL</div><div class="brand-sub">NON-CONFERENCE SCHEDULING OPTIMIZER</div>'
     '</div></div>'
     '<div class="brand-status"><span class="status-dot"></span>Optimizer online</div>'
     '</div>',
@@ -2182,10 +2455,10 @@ st.markdown(
 
 st.markdown(
     '<div class="hero"><div>'
-    '<div class="hero-kicker">SCHEDULING OPERATING SYSTEM</div>'
-    '<div class="hero-title">Find the move. See the ripple effect.</div>'
-    '<div class="hero-copy">Search future non-conference inventory, keep FBS conferences schedulable, identify buy-game and A4 opportunities, and solve cascading conflicts from one place.</div>'
-    '</div></div>',
+    '<div class="hero-kicker">NATIONAL SCHEDULING COMMAND CENTER</div>'
+    '<div class="hero-title">Plan, test and optimize every non-conference move.</div>'
+    '<div class="hero-copy">A single operational workspace for future-game inventory, conference parity, buy-game matching, A4 requirements and minimum-disruption schedule repair.</div>'
+    '</div><div><span class="status-chip good">● CP-SAT READY</span></div></div>',
     unsafe_allow_html=True,
 )
 
@@ -2213,13 +2486,15 @@ if source_mode == "Real public schedule data":
         default_idx = available_years.index(2028) if 2028 in available_years else 0
         season = st.selectbox("Season", available_years, index=default_idx)
     store = build_real_store(real_teams_df, real_games_df, season)
-    year_games = real_games_df[real_games_df["season"] == season]
+    year_games = real_games_df[real_games_df["season"] == season].copy()
+    year_games["game_id"] = [f"real{season}_{int(idx)+1}" for idx in year_games.index]
 else:
     store = build_demo_store()
     with ctrl2:
         season = st.selectbox("Season", sorted({g.season for g in store.games.values()}), index=0)
     year_games = pd.DataFrame([g.__dict__ for g in store.games.values()])
 
+year_games = apply_workspace_moves(store, year_games, season)
 optimizer = AdvancedNonConferenceOptimizer(store)
 
 if source_mode == "Real public schedule data":
@@ -2230,7 +2505,7 @@ if source_mode == "Real public schedule data":
         ("Season", str(season), "Active workspace"),
         ("Teams", f"{len(real_teams_df):,}", f"{fbs_count} FBS · {fcs_count} FCS"),
         ("Known games", f"{commitments:,}", "Dated + TBA commitments"),
-        ("Data status", "PUBLIC TEST", "Gridiron intent data not connected"),
+        ("Data status", "PUBLIC TEST", "Authoritative intent data not connected"),
     ]
 else:
     metrics = [
@@ -2248,7 +2523,17 @@ st.markdown(
 )
 
 if source_mode == "Real public schedule data":
-    st.caption("Public-data prototype · Blank dates are potential slots, not confirmed availability. Production Gridiron data would supply true needs, flexibility, guarantees, and moveability.")
+    st.caption("Public-data prototype · Blank dates are potential slots, not confirmed availability. Production scheduling data would supply true needs, flexibility, guarantees, and moveability.")
+
+workspace_count = len(_workspace_moves(season))
+if workspace_count:
+    wc1, wc2 = st.columns([5, 1])
+    with wc1:
+        _render_move_outcome("info", "What-if workspace active", f"{workspace_count} manually tested move{'s' if workspace_count != 1 else ''} are applied to this session.", "Calendars, parity and optimizer requests use the proposed workspace state.")
+    with wc2:
+        if st.button("Reset moves", key=f"reset_workspace_{season}", use_container_width=True):
+            _clear_workspace_moves(season)
+            st.rerun()
 
 
 def parity_table(season: int) -> pd.DataFrame:
@@ -2261,42 +2546,131 @@ def parity_table(season: int) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _parity_status_word(value: str) -> str:
+    value = str(value or "")
+    if value.startswith("EVEN"):
+        return "EVEN"
+    if value.startswith("ODD"):
+        return "ODD"
+    return value or "—"
+
+
 def render_solution(sol, idx: int):
-    label = f"#{idx}  {sol.title}"
-    with st.expander(label, expanded=(idx == 1)):
+    """Render a decision-oriented enterprise result instead of raw warning boxes."""
+    md = getattr(sol, "metadata", {}) or {}
+    mode = str(md.get("mode", ""))
+    move_count = len(sol.moves)
+    additional = md.get("additional_moves")
+    solver_status = str(md.get("solver_status", "—"))
+    solver_seconds = md.get("solver_seconds", "—")
+    scope_before = md.get("scope_before_bad")
+    scope_after = md.get("scope_after_bad")
+    before_bad = md.get("before_bad_count")
+    after_bad = md.get("after_bad_count")
+
+    if mode == "move":
+        outcome = "Clean move" if move_count == 1 and int(additional or 0) == 0 else "Repair path"
+        impact_value = "0 extra" if int(additional or 0) == 0 else f"{int(additional)} extra"
+        impact_label = "SECONDARY MOVES"
+    else:
+        outcome = "Optimized"
+        impact_value = f"{scope_after if scope_after is not None else (after_bad if after_bad is not None else '—')} remain"
+        impact_label = "REQUESTED ISSUES"
+
+    kpi_scope = "—"
+    if scope_before is not None and scope_after is not None:
+        kpi_scope = f"{scope_before} → {scope_after}"
+    elif before_bad is not None and after_bad is not None:
+        kpi_scope = f"{before_bad} → {after_bad}"
+
+    st.markdown(
+        '<div class="result-card">'
+        '<div class="result-top">'
+        f'<div><div class="result-rank">OPTION {idx}</div><div class="result-title">{_html_escape(sol.title)}</div></div>'
+        f'<div class="result-score">{sol.score:.0f}/100</div>'
+        '</div>'
+        f'<div class="result-summary">{_html_escape(sol.explanation)}</div>'
+        '<div class="result-kpis">'
+        f'<div class="result-kpi"><div class="result-kpi-label">OUTCOME</div><div class="result-kpi-value">{_html_escape(outcome)}</div></div>'
+        f'<div class="result-kpi"><div class="result-kpi-label">GAMES MOVED</div><div class="result-kpi-value">{move_count}</div></div>'
+        f'<div class="result-kpi"><div class="result-kpi-label">{_html_escape(impact_label)}</div><div class="result-kpi-value">{_html_escape(impact_value)}</div></div>'
+        f'<div class="result-kpi"><div class="result-kpi-label">PARITY / SCOPE</div><div class="result-kpi-value">{_html_escape(kpi_scope)}</div></div>'
+        '</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    if sol.moves:
+        rows = []
+        for m in sol.moves:
+            rows.append(
+                '<tr>'
+                f'<td><strong>{_html_escape(m.away_team)} @ {_html_escape(m.home_team)}</strong></td>'
+                f'<td>Week {m.from_week}</td>'
+                '<td class="move-arrow">→</td>'
+                f'<td><strong>Week {m.to_week}</strong></td>'
+                '</tr>'
+            )
         st.markdown(
-            f'<div class="solution-head"><div class="section-copy" style="margin:0">{_html_escape(sol.explanation)}</div><span class="score-pill">{sol.score:.1f}</span></div>',
+            '<div class="result-card" style="margin-top:-6px">'
+            '<table class="move-table"><thead><tr><th>GAME</th><th>CURRENT</th><th></th><th>PROPOSED</th></tr></thead><tbody>'
+            + ''.join(rows) + '</tbody></table></div>',
             unsafe_allow_html=True,
         )
-        if sol.moves:
-            df = pd.DataFrame([{
-                "Game": f"{m.away_team} @ {m.home_team}",
-                "Current": f"Week {m.from_week}",
-                "Proposed": f"Week {m.to_week}",
-            } for m in sol.moves])
-            st.dataframe(df, use_container_width=True, hide_index=True)
-        for warning in sol.warnings:
-            st.warning(warning)
-        if sol.parity_after:
-            changed = []
-            keys = sorted(set(sol.parity_before) | set(sol.parity_after))
-            for key in keys:
-                before = sol.parity_before.get(key, "—")
-                after = sol.parity_after.get(key, "—")
-                if before != after:
-                    changed.append({"Conference / Week": key, "Before": before, "After": after})
-            if changed:
-                st.markdown('<div class="section-kicker">PARITY IMPACT</div>', unsafe_allow_html=True)
-                st.dataframe(pd.DataFrame(changed), use_container_width=True, hide_index=True)
+    else:
+        _render_move_outcome("success", "No schedule movement required", "The requested condition is already satisfied in the current workspace.")
+
+    # Turn solver warnings into concise operational notes rather than large yellow boxes.
+    for warning in sol.warnings:
+        warning_text = str(warning)
+        if "global optimality" in warning_text.lower():
+            note = "Best solution found within the interactive time limit. The solver did not need to prove global optimality before returning it."
+            kind = "info"
+        elif "remain" in warning_text.lower():
+            note = warning_text
+            kind = "conflict"
+        else:
+            note = warning_text
+            kind = "info"
+        _render_move_outcome(kind, "Solver note", note)
+
+    if sol.parity_after:
+        changed = []
+        keys = sorted(set(sol.parity_before) | set(sol.parity_after))
+        for key in keys:
+            before = sol.parity_before.get(key, "—")
+            after = sol.parity_after.get(key, "—")
+            if before != after:
+                changed.append((key, before, after))
+        if changed:
+            rows = []
+            for key, before, after in changed[:24]:
+                rows.append(
+                    '<div class="parity-row">'
+                    f'<div class="parity-key">{_html_escape(key)}</div>'
+                    f'<div class="parity-old">{_html_escape(before)}</div>'
+                    '<div class="parity-arrow">→</div>'
+                    f'<div class="parity-new">{_html_escape(after)}</div>'
+                    '</div>'
+                )
+            st.markdown(
+                '<div class="result-card"><div class="parity-impact"><div class="section-kicker" style="margin-top:0">PARITY IMPACT</div>'
+                '<div class="section-copy" style="margin-bottom:6px">Only conference/week states changed by this recommendation are shown.</div>'
+                '<div class="parity-list">' + ''.join(rows) + '</div></div></div>',
+                unsafe_allow_html=True,
+            )
+
+    if solver_status != "—":
+        st.caption(f"{solver_status} · {solver_seconds}s · {getattr(optimizer, 'engine_name', 'Optimizer')}")
 
 
 # ---- Product navigation ----
 tab_chat, tab_calendar, tab_opt, tab_health, tab_schedule, tab_needs = st.tabs([
-    "Ask Gridiron", "Calendar", "Optimization Center", "Conference Health", "Schedule Data", "Open Market"
+    "Ask Optimizer", "Schedule Board", "Optimization Center", "Conference Health", "Schedule Data", "Open Market"
 ])
 
 with tab_chat:
-    st.markdown('<div class="section-kicker">ASK GRIDIRON</div><div class="section-title">What are you trying to accomplish?</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-kicker">ASK THE OPTIMIZER</div><div class="section-title">What are you trying to accomplish?</div>', unsafe_allow_html=True)
     if source_mode == "Demo":
         helper = "Try: Move Georgia vs McNeese to Week 2 and solve the displaced Tarleton game without creating a new FBS parity problem."
     else:
@@ -2336,18 +2710,18 @@ with tab_chat:
                     scope_bits.append(", ".join(intent.conferences))
                 if intent.target_weeks:
                     scope_bits.append("Weeks " + ", ".join(str(w) for w in intent.target_weeks))
-                st.info("Optimization scope: " + " · ".join(scope_bits))
-            with st.expander("How Gridiron interpreted your request", expanded=False):
+                _render_move_outcome("info", "Optimization scope", " · ".join(scope_bits))
+            with st.expander("How the optimizer interpreted your request", expanded=False):
                 st.json(intent.__dict__)
             if not solutions:
-                st.error("No feasible result was found in the current dataset. Public data does not yet include true school intent, contract flexibility, or guarantee requirements.")
+                _render_move_outcome("conflict", "No feasible result", "The optimizer could not satisfy the request with the currently loaded constraints.", "Public data does not yet include true school intent, contract flexibility or guarantee requirements.")
             else:
-                st.success(f"{len(solutions)} feasible option{'s' if len(solutions) != 1 else ''} found")
+                _render_move_outcome("success", "Solution found", f"{len(solutions)} feasible option{'s' if len(solutions) != 1 else ''} evaluated and ranked.")
                 for i, sol in enumerate(solutions, start=1):
                     render_solution(sol, i)
 
 with tab_calendar:
-    st.markdown('<div class="section-kicker">CALENDAR</div><div class="section-title">Non-conference inventory at a glance</div><div class="section-copy">Opponent logos sit on the actual game week. H = home, A = away, N = neutral. Empty cells are not confirmed open dates — they are simply dates with no known public commitment.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-kicker">SCHEDULE BOARD</div><div class="section-title">See the season. Test the move.</div><div class="section-copy">Opponent logos sit on the actual game week. H = home, A = away, N = neutral. Empty cells are not confirmed open dates — they are simply dates with no known public commitment.</div>', unsafe_allow_html=True)
     if source_mode != "Real public schedule data":
         st.info("Calendar view uses the real public scheduling dataset. Switch the data source above to Real public schedule data.")
     else:
@@ -2360,19 +2734,25 @@ with tab_calendar:
             with c2:
                 conference = st.selectbox("Conference", conferences, index=default_conf)
             st.markdown(f'<div class="section-kicker">{_html_escape(conference)} · {season}</div>', unsafe_allow_html=True)
-            render_conference_calendar(real_games_df, real_teams_df, season, conference)
+            render_conference_calendar(year_games, real_teams_df, season, conference)
+            conference_teams = sorted(real_teams_df[(real_teams_df["subdivision"] == "FBS") & (real_teams_df["conference"] == conference)]["name"].dropna().unique())
+            if conference_teams:
+                st.markdown('<div class="section-kicker">EDIT SCHEDULE</div>', unsafe_allow_html=True)
+                edit_team = st.selectbox("Choose a school to drag a game", conference_teams, key=f"conf_edit_team_{season}_{conference}")
+                render_drag_move_lab(store, optimizer, season, edit_team)
         else:
             team_names = sorted(real_teams_df["name"].dropna().unique())
             default_team = team_names.index("Georgia") if "Georgia" in team_names else 0
             with c2:
                 team = st.selectbox("Team", team_names, index=default_team)
-            render_team_calendar(real_games_df, real_teams_df, season, team)
+            render_team_calendar(year_games, real_teams_df, season, team)
+            render_drag_move_lab(store, optimizer, season, team)
 
 
 with tab_opt:
     st.markdown(
         '<div class="section-kicker">OPTIMIZATION CENTER</div>'
-        '<div class="section-title">Turn every Gridiron report into a solution</div>'
+        '<div class="section-title">Turn every scheduling report into a solution</div>'
         '<div class="section-copy">One CP-SAT engine powers the report scenarios below. It minimizes game movement, protects healthy conference/week parity, and applies the selected report objective as a mathematical optimization problem.</div>',
         unsafe_allow_html=True,
     )
@@ -2388,10 +2768,10 @@ with tab_opt:
         unsafe_allow_html=True,
     )
     if not ORTOOLS_AVAILABLE:
-        st.warning("OR-Tools is not installed in this runtime. The GitHub deployment package includes it in requirements.txt; Streamlit will install CP-SAT automatically after you commit both updated files.")
+        _render_move_outcome("conflict", "Advanced solver unavailable", "OR-Tools is not installed in this runtime.", "Commit the updated requirements.txt and Streamlit will install CP-SAT automatically.")
 
     report = st.selectbox(
-        "Gridiron report / scenario",
+        "Scheduling report / scenario",
         [
             "Odd / Even",
             "Scheduled Games / Move Repair",
@@ -2414,7 +2794,7 @@ with tab_opt:
             elapsed = time.perf_counter() - started
             st.caption(f"{optimizer.engine_name} · {optimizer.last_solver_status} · {elapsed:.2f}s")
             if not sols:
-                st.error("No feasible solution was found with the currently loaded data and constraints.")
+                _render_move_outcome("conflict", "No feasible solution", "The current constraints do not permit a valid schedule change.", "Try a different target week or connect authoritative intent/flexibility data for a richer feasible graph.")
             else:
                 for i, sol in enumerate(sols, 1):
                     render_solution(sol, i)
@@ -2430,11 +2810,11 @@ with tab_opt:
         with b:
             week = st.selectbox("Week", list(range(0, 14)), index=2, key="opt_parity_week")
         current = optimizer.conference_parity(store.copy_games(), season, week).get(conf, "Unknown")
-        st.info(f"Current {conf} Week {week}: {current}")
+        _render_move_outcome("info", f"{conf} · Week {week}", current, "This is the current conference parity state before optimization.")
         _run_and_render(Intent(action="MAKE_CONFERENCE_EVEN", season=season, target_week=week, conference=conf, max_additional_moves=6, summary="Optimization Center odd/even"), "run_parity")
 
     elif report == "Scheduled Games / Move Repair":
-        st.markdown('<div class="section-kicker">SCHEDULED GAMES</div><div class="section-copy">Choose a known non-conference game and force it into a new week. Gridiron first attempts the requested move only. It relocates other games only when they are directly displaced or when you explicitly ask to preserve conference parity.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-kicker">SCHEDULED GAMES</div><div class="section-copy">Choose a known non-conference game and force it into a new week. The optimizer first attempts the requested move only. It relocates other games only when they are directly displaced or when you explicitly ask to preserve conference parity.</div>', unsafe_allow_html=True)
         season_games = sorted([g for g in store.games.values() if g.season == season], key=lambda g: (g.week, g.home_team, g.away_team))
         if not season_games:
             st.info("No dated games are loaded for this season.")
@@ -2459,27 +2839,27 @@ with tab_opt:
         _run_and_render(Intent(action="OPTIMIZE_NATIONAL", season=season, preserve_fbs_conference_parity=False, max_additional_moves=30, summary="Optimize national non-conference schedule"), "run_national", f"Optimize {season}")
 
     elif report == "Market Report":
-        st.markdown('<div class="section-kicker">MARKET REPORT</div><div class="section-copy">Production mode maximizes fulfilled explicit buy/sell/A4 needs subject to mutual date availability. This requires Gridiron’s proprietary needs table; public schedule pages only show commitments, not school intent.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-kicker">MARKET REPORT</div><div class="section-copy">Production mode maximizes fulfilled explicit buy/sell/A4 needs subject to mutual date availability. This requires the authoritative needs table; public schedule pages only show commitments, not school intent.</div>', unsafe_allow_html=True)
         if store.needs:
             st.dataframe(pd.DataFrame([n.__dict__ for n in store.needs if n.season == season]), use_container_width=True, hide_index=True)
             _run_and_render(Intent(action="OPTIMIZE_MARKET", season=season, preserve_fbs_conference_parity=True, summary="Optimize market report"), "run_market", "Optimize market matches")
         else:
-            st.info("The solver path is built, but the public-data mode has no true ‘looking to buy/sell’ flags. Once connected to Gridiron, these report rows become explicit optimization demand.")
+            st.info("The solver path is built, but the public-data mode has no true ‘looking to buy/sell’ flags. Once connected to the authoritative scheduling data, these report rows become explicit optimization demand.")
 
     elif report == "Teams Needing Games":
-        st.markdown('<div class="section-kicker">TEAMS NEEDING GAMES</div><div class="section-copy">This scenario needs Gridiron’s true NEED_FBS / NEED_FCS / NEED_A4 inventory. Public blank dates cannot safely be treated as a school asking for a game.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-kicker">TEAMS NEEDING GAMES</div><div class="section-copy">This scenario needs authoritative NEED_FBS / NEED_FCS / NEED_A4 inventory. Public blank dates cannot safely be treated as a school asking for a game.</div>', unsafe_allow_html=True)
         if store.needs:
             st.dataframe(pd.DataFrame([n.__dict__ for n in store.needs if n.season == season]), use_container_width=True, hide_index=True)
         else:
-            st.info("Data adapter ready: connect the Gridiron Teams Needing Games report or underlying needs table to activate national maximum matching.")
+            st.info("Data adapter ready: connect the Teams Needing Games report or underlying needs table to activate national maximum matching.")
 
     elif report == "Pending Games":
         st.markdown('<div class="section-kicker">PENDING GAMES</div><div class="section-copy">Pending games should become soft reservations in the production model: protected more strongly than an open slot but still movable if a higher-value national solution requires it.</div>', unsafe_allow_html=True)
-        st.info("Public FBSchedules data does not expose Gridiron pending-game status. The production data adapter should map pending rows into weighted soft constraints.")
+        st.info("Public FBSchedules data does not expose authoritative pending-game status. The production data adapter should map pending rows into weighted soft constraints.")
 
     elif report == "Bye Report":
         st.markdown('<div class="section-kicker">BYE REPORT</div><div class="section-copy">A true bye optimizer requires the complete conference + non-conference schedule. A blank non-conference week is not necessarily a bye because a conference game may occupy it.</div>', unsafe_allow_html=True)
-        st.info("The CP-SAT model is ready to accept blocked/bye/conference-game weeks from Gridiron. Public non-conference data alone is intentionally not treated as authoritative bye data.")
+        st.info("The CP-SAT model is ready to accept blocked/bye/conference-game weeks from the authoritative scheduling system. Public non-conference data alone is intentionally not treated as authoritative bye data.")
 
 with tab_health:
     st.markdown('<div class="section-kicker">CONFERENCE HEALTH</div><div class="section-title">Weekly FBS scheduling parity</div><div class="section-copy">After removing teams with known dated non-conference games, is each conference left with an even number of teams available for conference play?</div>', unsafe_allow_html=True)
@@ -2496,10 +2876,10 @@ with tab_schedule:
     st.markdown('<div class="section-kicker">SCHEDULE DATA</div><div class="section-title">Known non-conference commitments</div>', unsafe_allow_html=True)
     if source_mode == "Real public schedule data":
         display_cols = ["date", "week", "away_team", "home_team", "neutral", "matchup_type", "away_conference", "home_conference"]
-        year_df = real_games_df[real_games_df["season"] == season]
-        st.dataframe(year_df[display_cols], use_container_width=True, hide_index=True, height=520)
+        year_df = year_games.copy()
+        st.dataframe(year_df[[c for c in display_cols if c in year_df.columns]], use_container_width=True, hide_index=True, height=520)
         csv_bytes = year_df.to_csv(index=False).encode("utf-8")
-        st.download_button(f"Download {season} CSV", csv_bytes, f"gridiron_{season}_public_snapshot.csv", "text/csv", use_container_width=False)
+        st.download_button(f"Download {season} CSV", csv_bytes, f"cfb_nonc_optimizer_{season}_public_snapshot.csv", "text/csv", use_container_width=False)
         if scrape_errors:
             with st.expander(f"Data warnings ({len(scrape_errors)})"):
                 st.code("\n".join(scrape_errors[:100]))
@@ -2508,7 +2888,7 @@ with tab_schedule:
         st.dataframe(games_df.sort_values(["season", "week", "home_team"]), use_container_width=True, hide_index=True)
 
 with tab_needs:
-    st.markdown('<div class="section-kicker">OPEN MARKET</div><div class="section-title">Potential scheduling inventory</div><div class="section-copy">Public data can identify teams with no known dated non-conference commitment. Gridiron’s production data would distinguish truly open, flexible, buy-game, A4, and blocked inventory.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-kicker">OPEN MARKET</div><div class="section-title">Potential scheduling inventory</div><div class="section-copy">Public data can identify teams with no known dated non-conference commitment. Production scheduling data would distinguish truly open, flexible, buy-game, A4, and blocked inventory.</div>', unsafe_allow_html=True)
     if source_mode == "Real public schedule data":
         candidate_week = st.select_slider("Week", options=list(range(0, 14)), value=2)
         base_games = store.copy_games()
