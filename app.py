@@ -30,78 +30,276 @@ from workspace_db import WorkspaceDB
 
 
 st.set_page_config(
-    page_title="College Football Scheduling Optimizer",
-    page_icon="🏈",
+    page_title="Schedule OS",
+    page_icon="◫",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 
 st.markdown("""
 <style>
-html,body,.stApp,[class*="css"]{
-  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif!important;
+:root{
+  --ink:#121923;
+  --muted:#697586;
+  --subtle:#8A96A6;
+  --canvas:#F5F7FA;
+  --surface:#FFFFFF;
+  --surface-2:#FAFBFC;
+  --navy:#0B1F33;
+  --navy-2:#102A43;
+  --blue:#246BFD;
+  --blue-soft:#EEF4FF;
+  --line:#E5EAF0;
+  --line-strong:#D7DEE8;
+  --green:#16835D;
+  --green-soft:#EAF8F2;
+  --amber:#A56600;
+  --amber-soft:#FFF5DF;
+  --red:#C2413A;
+  --red-soft:#FDEDEC;
+  --shadow:0 10px 35px rgba(19,33,53,.07);
 }
-.stApp{background:#fff;color:#202124}
-.block-container{max-width:1080px;padding-top:2.2rem;padding-bottom:5rem}
-h1,h2,h3{color:#202124!important;letter-spacing:-.025em}
-[data-testid="stMarkdownContainer"] p{font-size:17px;line-height:1.55;color:#5f6368}
-.simple-title{text-align:center;font-size:32px;font-weight:650;letter-spacing:-.035em;color:#202124;margin-top:8px}
-.simple-sub{text-align:center;font-size:17px;color:#5f6368;max-width:720px;margin:10px auto 30px;line-height:1.5}
-.data-pill{display:inline-flex;align-items:center;gap:7px;padding:7px 11px;border-radius:999px;border:1px solid #dadce0;font-size:14px;color:#5f6368;background:#fff}
-.data-pill.good{border-color:#c8e6c9;background:#f3fbf5;color:#137333}
-.data-pill.warn{border-color:#fdd663;background:#fff8e1;color:#8a5a00}
-.page-title{font-size:28px;font-weight:650;color:#202124;letter-spacing:-.03em;margin:20px 0 5px}
-.page-copy{font-size:17px;line-height:1.5;color:#5f6368;max-width:760px;margin-bottom:26px}
-.stTabs [data-baseweb="tab-list"]{gap:30px;border-bottom:1px solid #e8eaed}
-.stTabs [data-baseweb="tab"]{font-size:17px;font-weight:600;padding:14px 2px;height:auto}
-.stTabs [aria-selected="true"]{color:#1a73e8!important}
-.stButton>button{min-height:50px;border-radius:25px;font-size:16px;font-weight:650;padding:0 24px;box-shadow:none}
-.stButton>button[kind="primary"],.stButton>button[data-testid="baseButton-primary"]{background:#1a73e8;border-color:#1a73e8;color:#fff}
+html,body,.stApp,[class*="css"]{
+  font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif!important;
+}
+.stApp{background:var(--canvas)!important;color:var(--ink)!important}
+#MainMenu,footer{visibility:hidden}
+header[data-testid="stHeader"]{background:transparent!important}
+.block-container{
+  max-width:1460px!important;
+  padding:1.45rem 2.4rem 5rem!important;
+}
+[data-testid="stSidebar"]{
+  background:linear-gradient(180deg,var(--navy) 0%,#091A2B 100%)!important;
+  border-right:1px solid rgba(255,255,255,.05)!important;
+  min-width:280px!important;
+  max-width:280px!important;
+}
+[data-testid="stSidebar"]>div:first-child{padding-top:1.1rem!important}
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
+[data-testid="stSidebar"] label,
+[data-testid="stSidebar"] .stCaption{
+  color:#CBD7E5!important;
+}
+[data-testid="stSidebar"] .stSelectbox label,
+[data-testid="stSidebar"] .stRadio>label{
+  color:#8FA5BC!important;
+  font-size:11px!important;
+  font-weight:800!important;
+  letter-spacing:.11em!important;
+  text-transform:uppercase!important;
+}
+[data-testid="stSidebar"] .stRadio div[role="radiogroup"]{gap:5px!important}
+[data-testid="stSidebar"] .stRadio div[role="radiogroup"] label{
+  display:flex!important;
+  padding:10px 12px!important;
+  border-radius:10px!important;
+  color:#DDE7F1!important;
+  font-size:14px!important;
+  font-weight:650!important;
+  letter-spacing:0!important;
+  text-transform:none!important;
+  transition:.15s ease!important;
+}
+[data-testid="stSidebar"] .stRadio div[role="radiogroup"] label:hover{
+  background:rgba(255,255,255,.06)!important;
+}
+[data-testid="stSidebar"] .stRadio div[role="radiogroup"] label:has(input:checked){
+  background:rgba(76,135,255,.18)!important;
+  color:#FFFFFF!important;
+  box-shadow:inset 2px 0 0 #6E9BFF!important;
+}
+[data-testid="stSidebar"] .stRadio div[role="radiogroup"] [data-testid="stMarkdownContainer"] p{
+  color:inherit!important;
+  font-size:14px!important;
+  font-weight:650!important;
+}
+[data-testid="stSidebar"] div[data-baseweb="select"]>div{
+  background:#122C45!important;
+  color:#F5F8FC!important;
+  border:1px solid #29445F!important;
+  border-radius:10px!important;
+  min-height:43px!important;
+  box-shadow:none!important;
+}
+[data-testid="stSidebar"] div[data-baseweb="select"] svg{fill:#AFC0D1!important}
+[data-testid="stSidebar"] hr{border-color:rgba(255,255,255,.08)!important}
+[data-testid="stSidebar"] .stButton>button{
+  width:100%!important;
+  background:#132E48!important;
+  color:#E7EEF7!important;
+  border:1px solid #2A4661!important;
+}
+.sidebar-brand{
+  padding:4px 4px 20px;
+}
+.sidebar-mark{
+  display:flex;align-items:center;gap:10px;color:#fff;font-size:18px;font-weight:760;letter-spacing:-.02em
+}
+.sidebar-logo{
+  width:30px;height:30px;border-radius:9px;background:linear-gradient(145deg,#4D83FF,#235FDB);
+  display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px;font-weight:900;
+  box-shadow:0 5px 16px rgba(36,107,253,.32)
+}
+.sidebar-sub{font-size:10px;color:#7890A8;margin-top:7px;letter-spacing:.13em;text-transform:uppercase;font-weight:800}
+.sidebar-section{font-size:10px;color:#6F879F;letter-spacing:.13em;text-transform:uppercase;font-weight:800;margin:20px 3px 7px}
+.app-header{
+  display:flex;align-items:flex-start;justify-content:space-between;gap:20px;
+  margin:2px 0 22px;padding-bottom:20px;border-bottom:1px solid var(--line);
+}
+.app-eyebrow{font-size:11px;font-weight:850;color:#7D8A99;text-transform:uppercase;letter-spacing:.12em;margin-bottom:7px}
+.app-title{font-size:30px;line-height:1.15;font-weight:750;color:var(--ink);letter-spacing:-.035em}
+.app-subtitle{font-size:15px;color:var(--muted);margin-top:7px;line-height:1.5;max-width:800px}
+.header-meta{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;padding-top:2px}
+.meta-chip{
+  display:inline-flex;align-items:center;gap:6px;padding:7px 10px;border:1px solid var(--line);
+  background:var(--surface);border-radius:999px;font-size:12px;color:#536172;font-weight:650;white-space:nowrap
+}
+.meta-chip.good{background:var(--green-soft);border-color:#C9ECDF;color:var(--green)}
+.meta-chip.warn{background:var(--amber-soft);border-color:#F0D7A5;color:var(--amber)}
+.entity-bar{
+  display:flex;align-items:center;gap:14px;background:var(--surface);border:1px solid var(--line);
+  border-radius:16px;padding:14px 16px;margin-bottom:22px;box-shadow:0 4px 16px rgba(19,33,53,.035)
+}
+.entity-avatar{
+  width:44px;height:44px;border-radius:13px;background:linear-gradient(145deg,#122B44,#183B5B);
+  color:#fff;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:850;letter-spacing:.02em
+}
+.entity-name{font-size:19px;font-weight:730;color:var(--ink);letter-spacing:-.02em}
+.entity-meta{font-size:13px;color:var(--muted);margin-top:2px}
+.section-heading{font-size:20px;font-weight:720;color:var(--ink);letter-spacing:-.025em;margin:26px 0 5px}
+.section-copy{font-size:14px;color:var(--muted);line-height:1.5;margin-bottom:14px}
+.kpi-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:10px 0 24px}
+.kpi-card{
+  background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:17px 18px;
+  box-shadow:0 4px 16px rgba(19,33,53,.035)
+}
+.kpi-label{font-size:11px;text-transform:uppercase;letter-spacing:.09em;font-weight:800;color:#8995A4}
+.kpi-value{font-size:27px;font-weight:760;letter-spacing:-.035em;color:var(--ink);margin-top:5px}
+.kpi-detail{font-size:12px;color:var(--muted);margin-top:4px}
+.panel{
+  background:var(--surface);border:1px solid var(--line);border-radius:18px;padding:20px;
+  box-shadow:0 5px 20px rgba(19,33,53,.035);margin-bottom:16px
+}
+.panel-title{font-size:17px;font-weight:720;color:var(--ink);letter-spacing:-.02em}
+.panel-sub{font-size:13px;color:var(--muted);margin-top:3px}
+.schedule-shell{
+  background:var(--surface);border:1px solid var(--line);border-radius:18px;overflow:hidden;
+  box-shadow:0 5px 20px rgba(19,33,53,.035);margin:12px 0 18px
+}
+.schedule-top{
+  display:flex;align-items:center;justify-content:space-between;padding:15px 17px;border-bottom:1px solid var(--line);
+  background:linear-gradient(180deg,#fff,#FCFDFE)
+}
+.schedule-title{font-size:15px;font-weight:720;color:var(--ink)}
+.schedule-hint{font-size:12px;color:var(--muted)}
+.schedule-scroll{overflow-x:auto;padding:13px 14px 16px}
+.week-strip{display:grid;grid-template-columns:repeat(14,minmax(112px,1fr));gap:8px;min-width:1640px}
+.week-card{
+  position:relative;min-height:123px;border:1px solid var(--line);border-radius:13px;padding:11px 10px;
+  background:var(--surface);display:flex;flex-direction:column
+}
+.week-card.open{background:#FBFCFD;border-style:dashed}
+.week-card.pending{border-color:#F0D7A5;background:#FFFDF8}
+.week-card.locked:after{
+  content:"LOCKED";position:absolute;right:8px;top:8px;font-size:8px;font-weight:900;letter-spacing:.08em;color:#8995A4
+}
+.week-num{font-size:10px;font-weight:850;color:#8995A4;letter-spacing:.07em;text-transform:uppercase}
+.week-opp{font-size:14px;font-weight:730;color:var(--ink);line-height:1.22;margin-top:12px}
+.week-site{font-size:10px;font-weight:850;letter-spacing:.07em;text-transform:uppercase;margin-top:auto;padding-top:10px;color:#687687}
+.week-site.home{color:var(--green)}.week-site.away{color:#586A82}.week-site.neutral{color:#7C5CC7}
+.week-open{font-size:13px;color:#9AA5B3;margin:auto 0;font-weight:600}
+.tba-band{padding:0 14px 14px;display:flex;gap:8px;flex-wrap:wrap}
+.tba-chip{border:1px solid var(--line);background:#FAFBFC;border-radius:10px;padding:8px 10px;font-size:12px;color:#566474}
+.year-block{margin:15px 0 22px}
+.year-head{display:flex;align-items:center;justify-content:space-between;margin:0 2px 8px}
+.year-title{font-size:17px;font-weight:730;color:var(--ink)}
+.task-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:12px 0 22px}
+.task-card{
+  background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:16px;min-height:116px;
+  transition:.15s ease;box-shadow:0 3px 14px rgba(19,33,53,.025)
+}
+.task-card.active{border-color:#9FBBFF;background:#F8FAFF;box-shadow:0 0 0 3px rgba(36,107,253,.07)}
+.task-icon{width:30px;height:30px;border-radius:9px;background:var(--blue-soft);color:var(--blue);display:flex;align-items:center;justify-content:center;font-weight:850}
+.task-title{font-size:15px;font-weight:720;color:var(--ink);margin-top:11px}.task-sub{font-size:12px;color:var(--muted);line-height:1.4;margin-top:3px}
+.decision-card-premium{
+  background:var(--surface);border:1px solid #D9E2ED;border-radius:20px;box-shadow:var(--shadow);
+  overflow:hidden;margin:18px 0
+}
+.decision-head{display:flex;justify-content:space-between;gap:20px;padding:21px 22px 17px;border-bottom:1px solid var(--line)}
+.decision-kicker{font-size:10px;font-weight:900;color:var(--blue);letter-spacing:.12em;text-transform:uppercase}
+.decision-number{font-size:31px;font-weight:790;letter-spacing:-.045em;color:var(--ink);margin-top:3px}
+.decision-proof{font-size:12px;color:var(--muted);margin-top:4px}
+.decision-badge{align-self:flex-start;padding:7px 10px;border-radius:999px;background:var(--green-soft);color:var(--green);font-size:11px;font-weight:800}
+.decision-moves{padding:3px 22px}
+.decision-move{display:grid;grid-template-columns:32px 1fr auto;gap:12px;align-items:center;padding:15px 0;border-bottom:1px solid #EDF0F4}
+.decision-move:last-child{border-bottom:none}
+.step-num{width:28px;height:28px;border-radius:8px;background:#F1F4F8;color:#667587;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:800}
+.step-game{font-size:15px;font-weight:720;color:var(--ink)}.step-from{font-size:12px;color:var(--muted);margin-top:3px}.step-to{font-size:15px;font-weight:760;color:var(--blue);white-space:nowrap}
+.decision-validation{display:grid;grid-template-columns:1fr 1fr;border-top:1px solid var(--line);background:#FBFCFD}
+.validation-col{padding:17px 22px}.validation-col:first-child{border-right:1px solid var(--line)}
+.validation-title{font-size:10px;font-weight:900;letter-spacing:.11em;text-transform:uppercase;color:#8A96A6;margin-bottom:9px}
+.validation-item{font-size:13px;color:#536172;margin:7px 0;display:flex;gap:8px}.validation-item strong{color:var(--ink)}
+.dot-good{color:var(--green)}.dot-warn{color:var(--amber)}
+.tx-premium{
+  background:var(--surface);border:1px solid var(--line);border-radius:18px;padding:18px 19px;
+  margin:11px 0;box-shadow:0 4px 18px rgba(19,33,53,.035)
+}
+.tx-row{display:flex;justify-content:space-between;gap:18px;align-items:flex-start}
+.tx-title{font-size:17px;font-weight:730;color:var(--ink)}.tx-meta{font-size:12px;color:var(--muted);margin-top:4px}
+.status-badge{padding:6px 9px;border-radius:999px;font-size:10px;font-weight:900;letter-spacing:.06em;text-transform:uppercase}
+.status-badge.pending{background:var(--amber-soft);color:var(--amber)}.status-badge.completed{background:var(--green-soft);color:var(--green)}
+.status-badge.rejected,.status-badge.superseded{background:var(--red-soft);color:var(--red)}
+.approval-line{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin:13px 0 4px}
+.approval-pill{font-size:11px;font-weight:700;padding:6px 8px;border:1px solid var(--line);border-radius:999px;color:#617082;background:#FAFBFC}
+.approval-pill.accepted{background:var(--green-soft);border-color:#C9ECDF;color:var(--green)}
+.approval-pill.pending{background:var(--amber-soft);border-color:#F0D7A5;color:var(--amber)}
+.approval-pill.rejected,.approval-pill.changes_requested{background:var(--red-soft);border-color:#F2CAC6;color:var(--red)}
+.viewer-impact{background:#F7F9FC;border:1px solid var(--line);border-radius:12px;padding:11px 12px;margin-top:13px}
+.viewer-label{font-size:9px;font-weight:900;letter-spacing:.11em;text-transform:uppercase;color:#8A96A6}
+.viewer-change{font-size:13px;color:#435264;margin-top:6px}.viewer-change strong{color:var(--ink)}
+.market-premium{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:16px 17px;margin:10px 0}
+.market-row{display:flex;justify-content:space-between;gap:15px}.market-title{font-size:15px;font-weight:730;color:var(--ink)}
+.market-meta{font-size:12px;color:var(--muted);line-height:1.45;margin-top:4px}.market-badge{font-size:10px;font-weight:850;padding:5px 8px;border-radius:999px;background:var(--blue-soft);color:var(--blue);white-space:nowrap}
+.activity-list{background:var(--surface);border:1px solid var(--line);border-radius:16px;overflow:hidden}
+.activity-row{display:grid;grid-template-columns:82px 1fr;gap:12px;padding:13px 15px;border-bottom:1px solid #EDF0F4}
+.activity-row:last-child{border-bottom:none}.activity-time{font-size:11px;color:#8A96A6;font-weight:700}.activity-text{font-size:13px;color:#4D5C6D}.activity-text strong{color:var(--ink)}
+.empty-state{background:var(--surface);border:1px dashed var(--line-strong);border-radius:18px;padding:40px;text-align:center}
+.empty-title{font-size:18px;font-weight:730;color:var(--ink)}.empty-copy{font-size:13px;color:var(--muted);margin-top:6px}
+.parity-strip{display:grid;grid-template-columns:repeat(14,minmax(0,1fr));gap:7px;margin:12px 0}
+.parity-week{border:1px solid var(--line);border-radius:10px;background:var(--surface);padding:10px 7px;text-align:center}
+.parity-week.even{border-color:#D1E9DF;background:#F5FBF8}.parity-week.odd{border-color:#F0D7A5;background:#FFFAEF}
+.parity-num{font-size:10px;font-weight:850;color:#8793A2}.parity-state{font-size:10px;font-weight:850;margin-top:5px}.parity-week.even .parity-state{color:var(--green)}.parity-week.odd .parity-state{color:var(--amber)}
+.stButton>button{
+  min-height:43px!important;border-radius:10px!important;font-size:13px!important;font-weight:720!important;
+  padding:0 16px!important;box-shadow:none!important;border:1px solid var(--line-strong)!important
+}
+.stButton>button[kind="primary"],.stButton>button[data-testid="baseButton-primary"]{
+  background:var(--blue)!important;border-color:var(--blue)!important;color:#fff!important;
+  box-shadow:0 4px 12px rgba(36,107,253,.20)!important
+}
+.stButton>button:hover{border-color:#AEB9C6!important}
+.stButton>button[kind="primary"]:hover{background:#1E5FE5!important;border-color:#1E5FE5!important}
 .stSelectbox label,.stRadio label,.stTextInput label,.stSlider label,.stMultiSelect label,.stTextArea label,.stCheckbox label,.stNumberInput label,.stFileUploader label{
-  font-size:16px!important;color:#3c4043!important;font-weight:600!important;text-transform:none!important;letter-spacing:0!important
+  font-size:12px!important;color:#687687!important;font-weight:760!important;letter-spacing:.01em!important
 }
 div[data-baseweb="select"]>div,.stTextInput input,.stTextArea textarea,.stMultiSelect [data-baseweb="select"]>div,.stNumberInput input{
-  background:#fff!important;border:1px solid #dadce0!important;border-radius:16px!important;min-height:52px!important;color:#202124!important;box-shadow:none!important;font-size:16px!important
+  background:var(--surface)!important;border:1px solid var(--line-strong)!important;border-radius:10px!important;min-height:45px!important;
+  color:var(--ink)!important;box-shadow:none!important;font-size:13px!important
 }
-[data-testid="stExpander"]{border:1px solid #e8eaed;border-radius:16px;background:#fff;box-shadow:none;margin:12px 0}
-[data-testid="stExpander"] summary{font-size:16px;font-weight:600;color:#3c4043}
-.answer{border:1px solid #dadce0;border-radius:22px;padding:24px;margin:20px 0;background:#fff}
-.answer-label{font-size:14px;font-weight:700;color:#1a73e8;margin-bottom:7px}
-.answer-title{font-size:25px;font-weight:650;color:#202124;letter-spacing:-.02em}
-.answer-meta{font-size:16px;color:#5f6368;margin-top:5px}
-.move-row{display:grid;grid-template-columns:34px 1fr auto;gap:14px;align-items:center;padding:17px 0;border-top:1px solid #eceff1}
-.move-num{width:30px;height:30px;border-radius:50%;background:#f1f3f4;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;color:#5f6368}
-.move-game{font-size:17px;font-weight:650;color:#202124}.move-why{font-size:14px;color:#5f6368;margin-top:3px}
-.move-week{font-size:16px;font-weight:650;color:#1a73e8;white-space:nowrap}
-.checks{display:flex;flex-wrap:wrap;gap:9px;margin:14px 0}
-.check{font-size:14px;color:#3c4043;padding:7px 10px;border-radius:999px;background:#f8f9fa;border:1px solid #e8eaed}
-.check.ok{color:#137333;background:#f3fbf5;border-color:#c8e6c9}.check.warn{color:#8a5a00;background:#fff8e1;border-color:#fdd663}
-.rule-row{border:1px solid #e8eaed;border-radius:14px;padding:13px 15px;margin:8px 0;background:#fff}
-.rule-title{font-size:15px;font-weight:650;color:#202124}.rule-meta{font-size:14px;color:#5f6368;margin-top:3px}
-.year-row{display:grid;grid-template-columns:90px 1fr;gap:18px;padding:18px 0;border-top:1px solid #eceff1}
-.year-label{font-size:22px;font-weight:650;color:#202124}
-.game-chips{display:flex;gap:10px;flex-wrap:wrap}
-.game-chip{border:1px solid #dadce0;border-radius:14px;padding:10px 12px;min-width:150px}
-.game-chip-week{font-size:14px;color:#5f6368}.game-chip-opp{font-size:16px;font-weight:650;color:#202124;margin-top:2px}.game-chip-site{font-size:14px;color:#5f6368;margin-top:2px}
-.status-line{font-size:15px;color:#5f6368;margin:8px 0 18px}
-.workspace-bar{border:1px solid #e8eaed;border-radius:18px;padding:14px 16px;margin:4px 0 22px;background:#fafafa}
-.tx-card{border:1px solid #dadce0;border-radius:18px;padding:18px;margin:12px 0;background:#fff}
-.tx-title{font-size:18px;font-weight:650;color:#202124}.tx-meta{font-size:14px;color:#5f6368;margin-top:4px}
-.tx-status{display:inline-block;padding:5px 9px;border-radius:999px;font-size:13px;font-weight:650;background:#f1f3f4;color:#5f6368;margin-top:10px}
-.tx-status.pending{background:#fff8e1;color:#8a5a00}.tx-status.completed{background:#f3fbf5;color:#137333}.tx-status.rejected{background:#fce8e6;color:#c5221f}
-.approval-grid{display:flex;flex-wrap:wrap;gap:7px;margin-top:10px}.approval{font-size:13px;padding:6px 9px;border:1px solid #e8eaed;border-radius:999px;color:#5f6368}
-.approval.accepted{background:#f3fbf5;color:#137333;border-color:#c8e6c9}.approval.pending{background:#fff8e1;color:#8a5a00;border-color:#fdd663}.approval.rejected{background:#fce8e6;color:#c5221f;border-color:#f4c7c3}
-.approval.changes_requested{background:#fce8e6;color:#b06000;border-color:#fdd663}
-.outcome-note{border-left:3px solid #1a73e8;background:#f8fbff;padding:12px 14px;border-radius:0 12px 12px 0;font-size:15px;color:#5f6368;margin:10px 0 18px}
-.market-card{border:1px solid #e8eaed;border-radius:18px;padding:17px 18px;margin:11px 0;background:#fff}
-.market-title{font-size:18px;font-weight:650;color:#202124}.market-meta{font-size:14px;color:#5f6368;margin-top:5px;line-height:1.45}
-.market-high{display:inline-block;margin-top:9px;padding:5px 8px;border-radius:999px;background:#f3fbf5;color:#137333;font-size:13px;font-weight:650}
-.impact-school{font-size:17px;font-weight:650;color:#202124;margin-top:15px}.impact-row{font-size:15px;color:#5f6368;margin:4px 0}
-[data-testid="stDataFrame"]{font-size:15px}
-small,.stCaption,[data-testid="stCaptionContainer"]{font-size:14px!important;color:#80868b!important}
-@media(max-width:800px){
- .block-container{padding-top:1.2rem}.simple-title{font-size:27px}.page-title{font-size:25px}
- .year-row{grid-template-columns:1fr;gap:8px}.move-row{grid-template-columns:32px 1fr}.move-week{grid-column:2}
+[data-testid="stExpander"]{
+  border:1px solid var(--line)!important;border-radius:14px!important;background:var(--surface)!important;box-shadow:none!important;margin:10px 0!important
+}
+[data-testid="stExpander"] summary{font-size:13px!important;font-weight:700!important;color:#4D5C6D!important}
+[data-testid="stMarkdownContainer"] p{font-size:14px;line-height:1.55;color:#5D6B7C}
+small,.stCaption,[data-testid="stCaptionContainer"]{font-size:11px!important;color:#8491A0!important}
+[data-testid="stAlert"]{border-radius:12px!important}
+[data-testid="stDataFrame"]{border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.desktop-only-note{font-size:11px;color:#8995A4}
+@media(max-width:1100px){
+  .block-container{padding-left:1.2rem!important;padding-right:1.2rem!important}
+  .kpi-grid,.task-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .decision-validation{grid-template-columns:1fr}.validation-col:first-child{border-right:none;border-bottom:1px solid var(--line)}
 }
 </style>
 """, unsafe_allow_html=True)
@@ -350,33 +548,72 @@ def render_result(
     after = apply_moves(before, sol)
     new_odd = odd_keys(engine, after, season) - odd_keys(engine, before, season)
     proven = bool(md.get("lexicographic_proven", False))
+    affected = sorted({school for m in sol.moves for school in (m.home_team, m.away_team)})
+
+    a4_moved = 0
+    for move in sol.moves:
+        game = engine.store.games.get(move.game_id)
+        if not game:
+            continue
+        home = engine.store.teams.get(game.home_team)
+        away = engine.store.teams.get(game.away_team)
+        if home and away and home.is_a4 and away.is_a4:
+            a4_moved += 1
+
+    proof_text = "Minimum number of changes proven" if proven else "Best path found within the solve window"
+    move_rows = []
+    for i, move in enumerate(sol.moves, 1):
+        move_rows.append(
+            f'<div class="decision-move"><div class="step-num">{i}</div><div>'
+            f'<div class="step-game">{move.away_team} @ {move.home_team}</div>'
+            f'<div class="step-from">Current · Week {display_week(move.from_week)}</div></div>'
+            f'<div class="step-to">Week {display_week(move.to_week)} →</div></div>'
+        )
+
+    science = [
+        '<div class="validation-item"><span class="dot-good">●</span><span><strong>Hard rules</strong> satisfied</span></div>',
+        (
+            '<div class="validation-item"><span class="dot-good">●</span><span><strong>Conference parity</strong> protected</span></div>'
+            if not new_odd
+            else f'<div class="validation-item"><span class="dot-warn">●</span><span><strong>{len(new_odd)} parity issue(s)</strong> created</span></div>'
+        ),
+        (
+            '<div class="validation-item"><span class="dot-good">●</span><span><strong>Minimum changes</strong> proven</span></div>'
+            if proven
+            else '<div class="validation-item"><span class="dot-warn">●</span><span><strong>Best path</strong> within time budget</span></div>'
+        ),
+    ]
+    human = [
+        f'<div class="validation-item"><span class="dot-good">●</span><span><strong>{len(affected)} school{"s" if len(affected) != 1 else ""}</strong> affected</span></div>',
+        (
+            '<div class="validation-item"><span class="dot-good">●</span><span><strong>No A4 game</strong> moved</span></div>'
+            if a4_moved == 0
+            else f'<div class="validation-item"><span class="dot-warn">●</span><span><strong>{a4_moved} A4 game{"s" if a4_moved != 1 else ""}</strong> moved</span></div>'
+        ),
+        (
+            '<div class="validation-item"><span class="dot-good">●</span><span><strong>Coach / AD context</strong> attached</span></div>'
+            if str(md.get("coach_context", "") or "").strip()
+            else '<div class="validation-item"><span style="color:#A9B3BF">●</span><span>No additional human context attached</span></div>'
+        ),
+    ]
 
     st.markdown(
-        f'<div class="answer"><div class="answer-label">{label}</div>'
-        f'<div class="answer-title">{len(sol.moves)} game change{"s" if len(sol.moves)!=1 else ""}</div>'
-        f'<div class="answer-meta">{"Minimum number of changes proven" if proven else "Best path found within the solve window"} · {data_status}</div>',
-        unsafe_allow_html=True,
-    )
-    for i, move in enumerate(sol.moves, 1):
-        st.markdown(
-            f'<div class="move-row"><div class="move-num">{i}</div><div>'
-            f'<div class="move-game">{move.away_team} @ {move.home_team}</div>'
-            f'<div class="move-why">Move from Week {display_week(move.from_week)}</div></div>'
-            f'<div class="move-week">→ Week {display_week(move.to_week)}</div></div>',
-            unsafe_allow_html=True,
-        )
-    st.markdown(
-        '<div class="checks">'
-        '<span class="check ok">✓ Hard constraints satisfied</span>'
-        f'<span class="check {"ok" if not new_odd else "warn"}">'
-        f'{"✓ No new parity issue" if not new_odd else f"⚠ {len(new_odd)} new parity issue(s)"}</span>'
-        f'<span class="check">Data: {data_status}</span>'
-        '</div></div>',
+        f'<div class="decision-card-premium">'
+        f'<div class="decision-head"><div><div class="decision-kicker">{label}</div>'
+        f'<div class="decision-number">{len(sol.moves)} change{"s" if len(sol.moves) != 1 else ""}</div>'
+        f'<div class="decision-proof">{proof_text} · {data_status}</div></div>'
+        f'<div class="decision-badge">FEASIBLE</div></div>'
+        f'<div class="decision-moves">{"".join(move_rows)}</div>'
+        f'<div class="decision-validation">'
+        f'<div class="validation-col"><div class="validation-title">Feasibility · Science</div>{"".join(science)}</div>'
+        f'<div class="validation-col"><div class="validation-title">Human considerations · Judgment</div>{"".join(human)}</div>'
+        f'</div></div>',
         unsafe_allow_html=True,
     )
     if sol.warnings:
-        for warning in sol.warnings:
-            st.caption(warning)
+        with st.expander("Validation notes", expanded=False):
+            for warning in sol.warnings:
+                st.caption(warning)
 
 
 def scenario_payload(sol: Solution, season: int, title: str, data_status: str) -> Dict[str, object]:
@@ -429,184 +666,103 @@ def _safe_internal_week(value) -> Optional[int]:
         return None
 
 
-def render_all_years(games_df: pd.DataFrame, team: str):
-    """Render every loaded year. Week-TBA commitments are first-class records."""
-    subset = games_df[(games_df["home_team"] == team) | (games_df["away_team"] == team)].copy()
-    if subset.empty:
-        st.info("No known future games for this team.")
-        return
+def _team_initials(name: str) -> str:
+    parts = [p for p in str(name).replace("&", " ").split() if p]
+    if not parts:
+        return "CF"
+    if len(parts) == 1:
+        return parts[0][:2].upper()
+    return (parts[0][0] + parts[-1][0]).upper()
 
-    years = sorted(int(y) for y in subset["season"].dropna().unique())
-    for year in years:
-        ys = subset[subset["season"] == year].copy()
-        ys["_week_sort"] = ys["week"].apply(lambda v: _safe_internal_week(v) if _safe_internal_week(v) is not None else 99)
-        if "date" not in ys.columns:
-            ys["date"] = ""
-        ys = ys.sort_values(["_week_sort", "date", "home_team", "away_team"])
 
-        chips = []
-        for _, row in ys.iterrows():
-            neutral = bool(row.get("neutral", False))
-            if str(row["home_team"]) == team:
-                opp = str(row["away_team"])
-                site = "Neutral" if neutral else "Home"
-            else:
-                opp = str(row["home_team"])
-                site = "Neutral" if neutral else "Away"
+def _schedule_row_view(row: pd.Series, team: str) -> Tuple[str, str]:
+    neutral = bool(row.get("neutral", False))
+    if str(row["home_team"]) == team:
+        return str(row["away_team"]), "Neutral" if neutral else "Home"
+    return str(row["home_team"]), "Neutral" if neutral else "Away"
 
-            internal = _safe_internal_week(row.get("week"))
-            week_text = f"Week {display_week(internal)}" if internal is not None else "Week TBA"
-            date_text = str(row.get("date", "") or "").strip()
-            meta = site + (f" · {date_text}" if date_text and date_text.lower() not in {"nan", "none"} else "")
 
-            chips.append(
-                f'<div class="game-chip"><div class="game-chip-week">{week_text}</div>'
-                f'<div class="game-chip-opp">{opp}</div><div class="game-chip-site">{meta}</div></div>'
+def render_schedule_strip(
+    games_df: pd.DataFrame,
+    team: str,
+    year: int,
+    *,
+    authoritative: bool = False,
+    title: Optional[str] = None,
+):
+    subset = games_df[
+        (pd.to_numeric(games_df["season"], errors="coerce") == int(year))
+        & ((games_df["home_team"] == team) | (games_df["away_team"] == team))
+    ].copy()
+
+    dated: Dict[int, pd.Series] = {}
+    tba_rows: List[pd.Series] = []
+    for _, row in subset.iterrows():
+        week = _safe_internal_week(row.get("week"))
+        if week is None:
+            tba_rows.append(row)
+        elif week not in dated:
+            dated[week] = row
+
+    cards = []
+    for week in range(14):
+        row = dated.get(week)
+        if row is None:
+            open_text = "Open" if authoritative else "No known game"
+            cards.append(
+                f'<div class="week-card open"><div class="week-num">Week {display_week(week)}</div>'
+                f'<div class="week-open">{open_text}</div><div class="week-site">—</div></div>'
             )
-        st.markdown(
-            f'<div class="year-row"><div class="year-label">{year}</div><div class="game-chips">{"".join(chips)}</div></div>',
-            unsafe_allow_html=True,
+            continue
+
+        opp, site = _schedule_row_view(row, team)
+        moveability = str(row.get("moveability", "") or "").upper()
+        status = str(row.get("game_status", "") or "").upper()
+        css = ""
+        if moveability == "LOCKED":
+            css = " locked"
+        elif status in {"PENDING", "HOLD", "CONCEPT"}:
+            css = " pending"
+        site_class = site.lower()
+        cards.append(
+            f'<div class="week-card{css}"><div class="week-num">Week {display_week(week)}</div>'
+            f'<div class="week-opp">{opp}</div><div class="week-site {site_class}">{site}</div></div>'
         )
 
+    tba_html = ""
+    if tba_rows:
+        chips = []
+        for row in tba_rows:
+            opp, site = _schedule_row_view(row, team)
+            chips.append(f'<span class="tba-chip">TBA · {opp} · {site}</span>')
+        tba_html = f'<div class="tba-band">{"".join(chips)}</div>'
 
-
-def _tx_items(db: WorkspaceDB) -> List[Dict[str, object]]:
-    """Transaction listing compatible with every V5+ WorkspaceDB."""
-    return db.list("transaction")
-
-
-def _tx_get(db: WorkspaceDB, tx_id: str) -> Optional[Dict[str, object]]:
-    return db.get("transaction", tx_id)
-
-
-def _tx_save(db: WorkspaceDB, tx_id: str, tx: Dict[str, object]) -> None:
-    body = dict(tx)
-    body["transaction_id"] = tx_id
-    body["updated_at"] = datetime.now().isoformat()
-    db.put("transaction", tx_id, body)
-
-
-def _tx_create(db: WorkspaceDB, payload: Dict[str, object]) -> str:
-    body = dict(payload)
-    stamp = datetime.now()
-    raw = json.dumps(body, sort_keys=True, default=str)
-    tx_id = str(body.get("transaction_id") or f"tx_{stamp.strftime('%Y%m%d%H%M%S')}_{abs(hash(raw)) % 100000:05d}")
-    body["transaction_id"] = tx_id
-    body.setdefault("created_at", stamp.isoformat())
-    body.setdefault("history", [])
-    _tx_save(db, tx_id, body)
-    return tx_id
-
-
-def _tx_action(
-    db: WorkspaceDB,
-    tx_id: str,
-    *,
-    actor: str,
-    action: str,
-    note: str = "",
-    extra: Optional[Dict[str, object]] = None,
-) -> Optional[Dict[str, object]]:
-    tx = _tx_get(db, tx_id)
-    if not tx:
-        return None
-    history = list(tx.get("history", []))
-    history.append({
-        "at": datetime.now().isoformat(),
-        "actor": actor,
-        "action": action,
-        "note": note,
-        "extra": extra or {},
-    })
-    tx["history"] = history
-    _tx_save(db, tx_id, tx)
-    return tx
-
-
-def _tx_recalculate_status(tx: Dict[str, object]) -> Dict[str, object]:
-    status = str(tx.get("status", "")).upper()
-    if status in {"REJECTED", "SUPERSEDED"}:
-        return tx
-    school_approvals = dict(tx.get("school_approvals", {}))
-    conference_approvals = dict(tx.get("conference_approvals", {}))
-    if any(str(v).upper() == "REJECTED" for v in school_approvals.values()):
-        tx["status"] = "REJECTED"
-        return tx
-    schools_done = bool(school_approvals) and all(
-        str(v).upper() == "ACCEPTED" for v in school_approvals.values()
+    st.markdown(
+        f'<div class="schedule-shell"><div class="schedule-top">'
+        f'<div class="schedule-title">{title or f"{team} · {year}"}</div>'
+        f'<div class="schedule-hint">Weeks 1–14</div></div>'
+        f'<div class="schedule-scroll"><div class="week-strip">{"".join(cards)}</div></div>'
+        f'{tba_html}</div>',
+        unsafe_allow_html=True,
     )
-    conferences_done = all(
-        str(v).upper() == "ACCEPTED" for v in conference_approvals.values()
-    )
-    if schools_done and conferences_done:
-        tx["status"] = "COMPLETED"
-        tx["completed_at"] = datetime.now().isoformat()
-    else:
-        tx["status"] = "PENDING"
-    return tx
 
 
-def _tx_school_approval(
-    db: WorkspaceDB,
-    tx_id: str,
-    school: str,
-    status: str,
-    note: str = "",
-) -> Optional[Dict[str, object]]:
-    tx = _tx_get(db, tx_id)
-    if not tx:
-        return None
-    approvals = dict(tx.get("school_approvals", {}))
-    approvals[school] = str(status).upper()
-    tx["school_approvals"] = approvals
-    tx = _tx_recalculate_status(tx)
-    _tx_save(db, tx_id, tx)
-    _tx_action(
-        db, tx_id, actor=school,
-        action=f"SCHOOL_{str(status).upper()}",
-        note=note,
-    )
-    return _tx_get(db, tx_id)
-
-
-def _tx_conference_approval(
-    db: WorkspaceDB,
-    tx_id: str,
-    conference: str,
-    status: str,
-    note: str = "",
-) -> Optional[Dict[str, object]]:
-    tx = _tx_get(db, tx_id)
-    if not tx:
-        return None
-    approvals = dict(tx.get("conference_approvals", {}))
-    approvals[conference] = str(status).upper()
-    tx["conference_approvals"] = approvals
-    tx = _tx_recalculate_status(tx)
-    _tx_save(db, tx_id, tx)
-    _tx_action(
-        db, tx_id, actor=conference,
-        action=f"CONFERENCE_{str(status).upper()}",
-        note=note,
-    )
-    return _tx_get(db, tx_id)
-
-
-def _tx_set_status(
-    db: WorkspaceDB,
-    tx_id: str,
-    status: str,
-    *,
-    actor: str = "System",
-    note: str = "",
-) -> Optional[Dict[str, object]]:
-    tx = _tx_get(db, tx_id)
-    if not tx:
-        return None
-    tx["status"] = str(status).upper()
-    _tx_save(db, tx_id, tx)
-    _tx_action(db, tx_id, actor=actor, action=f"STATUS_{str(status).upper()}", note=note)
-    return _tx_get(db, tx_id)
+def render_all_years(games_df: pd.DataFrame, team: str, *, authoritative: bool = False):
+    subset = games_df[(games_df["home_team"] == team) | (games_df["away_team"] == team)].copy()
+    if subset.empty:
+        st.markdown(
+            '<div class="empty-state"><div class="empty-title">No future commitments loaded</div>'
+            '<div class="empty-copy">Future games will appear here as schedule data is added.</div></div>',
+            unsafe_allow_html=True,
+        )
+        return
+    years = sorted(int(y) for y in subset["season"].dropna().unique())
+    for year in years:
+        st.markdown(
+            f'<div class="year-block"><div class="year-head"><div class="year-title">{year}</div></div></div>',
+            unsafe_allow_html=True,
+        )
+        render_schedule_strip(games_df, team, year, authoritative=authoritative, title=f"{team} · {year}")
 
 
 def completed_transactions(db: WorkspaceDB) -> List[Dict[str, object]]:
@@ -971,20 +1127,19 @@ def render_school_impacts(sol: Solution):
             )
     if not impacts:
         return
-    st.markdown("**Affected schools**")
-    for school in sorted(impacts):
-        st.markdown(f'<div class="impact-school">{school}</div>', unsafe_allow_html=True)
-        for text in impacts[school]:
-            st.markdown(f'<div class="impact-row">{text}</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-heading">Affected schools</div>', unsafe_allow_html=True)
+    cols = st.columns(min(3, max(1, len(impacts))))
+    for idx, school in enumerate(sorted(impacts)):
+        with cols[idx % len(cols)]:
+            with st.container(border=True):
+                st.markdown(f"**{school}**")
+                for text in impacts[school]:
+                    st.caption(text)
 
 
 def transaction_card(tx: Dict[str, object], viewer: str):
     status = str(tx.get("status", "PENDING")).upper()
-    css = (
-        "completed" if status == "COMPLETED"
-        else "rejected" if status in {"REJECTED", "SUPERSEDED"}
-        else "pending"
-    )
+    css = status.lower()
     moves = list(tx.get("moves", []))
     additions = list(tx.get("add_games", []))
     count = len(moves) + len(additions)
@@ -997,45 +1152,45 @@ def transaction_card(tx: Dict[str, object], viewer: str):
     else:
         title = f"{len(moves)}-game coordinated repair"
 
+    approvals = dict(tx.get("school_approvals", {}))
+    approval_html = []
+    for school, astatus in approvals.items():
+        approval_html.append(
+            f'<span class="approval-pill {str(astatus).lower()}">{school} · {str(astatus).title()}</span>'
+        )
+
+    viewer_html = ""
+    if viewer in approvals:
+        own = [m for m in moves if viewer in {m.get("home_team"), m.get("away_team")}]
+        own_add = [g for g in additions if viewer in {g.get("home_team"), g.get("away_team")}]
+        changes = []
+        for m in own:
+            changes.append(
+                f'<div class="viewer-change"><strong>{m["away_team"]} @ {m["home_team"]}</strong> · '
+                f'Week {display_week(int(m["from_week"]))} → Week {display_week(int(m["to_week"]))}</div>'
+            )
+        for g in own_add:
+            changes.append(
+                f'<div class="viewer-change"><strong>Add {g["away_team"]} @ {g["home_team"]}</strong> · '
+                f'Week {display_week(int(g["week"]))}</div>'
+            )
+        if changes:
+            viewer_html = (
+                f'<div class="viewer-impact"><div class="viewer-label">Your impact · {viewer}</div>'
+                f'{"".join(changes)}</div>'
+            )
+
     st.markdown(
-        f'<div class="tx-card"><div class="tx-title">{title}</div>'
-        f'<div class="tx-meta">Season {tx.get("season")} · Proposed by {tx.get("proposer")} · '
-        f'{count} schedule action{"s" if count != 1 else ""}</div>'
-        f'<span class="tx-status {css}">{status}</span>',
+        f'<div class="tx-premium"><div class="tx-row"><div>'
+        f'<div class="tx-title">{title}</div>'
+        f'<div class="tx-meta">{tx.get("season")} · Proposed by {tx.get("proposer")} · '
+        f'{count} schedule action{"s" if count != 1 else ""}</div></div>'
+        f'<span class="status-badge {css}">{status}</span></div>'
+        f'<div class="approval-line">{"".join(approval_html)}</div>{viewer_html}</div>',
         unsafe_allow_html=True,
     )
 
-    approvals = dict(tx.get("school_approvals", {}))
-    if approvals:
-        approval_html = []
-        for school, astatus in approvals.items():
-            acss = str(astatus).lower()
-            approval_html.append(f'<span class="approval {acss}">{school}: {astatus}</span>')
-        st.markdown('<div class="approval-grid">' + "".join(approval_html) + '</div>', unsafe_allow_html=True)
-
-    # Five-second school impact: show viewer's changes first.
-    if viewer in approvals:
-        own = [
-            m for m in moves
-            if viewer in {m.get("home_team"), m.get("away_team")}
-        ]
-        own_add = [
-            g for g in additions
-            if viewer in {g.get("home_team"), g.get("away_team")}
-        ]
-        if own or own_add:
-            st.markdown(f"**Your impact — {viewer}**")
-            for m in own:
-                st.write(
-                    f"• {m['away_team']} @ {m['home_team']}: "
-                    f"Week {display_week(int(m['from_week']))} → Week {display_week(int(m['to_week']))}"
-                )
-            for g in own_add:
-                st.write(
-                    f"• Add {g['away_team']} @ {g['home_team']} in Week {display_week(int(g['week']))}"
-                )
-
-    with st.expander("Full coordinated plan", expanded=viewer not in approvals):
+    with st.expander("Full coordinated plan", expanded=False):
         for i, m in enumerate(moves, 1):
             st.write(
                 f"{i}. {m['away_team']} @ {m['home_team']}: "
@@ -1043,11 +1198,9 @@ def transaction_card(tx: Dict[str, object], viewer: str):
             )
         for g in additions:
             st.write(f"Add {g['away_team']} @ {g['home_team']} — Week {display_week(int(g['week']))}")
-
-    confs = list(tx.get("governing_conferences", []))
-    if confs:
-        st.caption("Automated conference guardrails: " + ", ".join(confs))
-    st.markdown("</div>", unsafe_allow_html=True)
+        confs = list(tx.get("governing_conferences", []))
+        if confs:
+            st.caption("Conference guardrails: " + ", ".join(confs))
 
 
 def market_result_card(
@@ -1068,25 +1221,24 @@ def market_result_card(
         bool(policies.get(c, {}).get("enforce_no_new_parity", True))
         for c in relevant_confs
     )
-
+    badge = (
+        "Explicit match" if md.get("explicit_need")
+        else "Early market" if str(md.get("market_liquidity")) == "HIGH"
+        else "Available"
+    )
     st.markdown(
-        f'<div class="market-card"><div class="market-title">{away} @ {home} · Week {display_week(week)}</div>'
-        f'<div class="market-meta">{match.explanation}</div>'
-        + (
-            '<span class="market-high">High-opportunity Weeks 1–4</span>'
-            if str(md.get("market_liquidity")) == "HIGH" else ""
-        )
-        + '</div>',
+        f'<div class="market-premium"><div class="market-row"><div>'
+        f'<div class="market-title">{away} @ {home} · Week {display_week(week)}</div>'
+        f'<div class="market-meta">{match.explanation}</div></div>'
+        f'<span class="market-badge">{badge}</span></div></div>',
         unsafe_allow_html=True,
     )
-    if md.get("explicit_need"):
-        st.caption("✓ Compatible explicit school need is recorded.")
     if impact["resolved_issues"]:
-        st.success(f"This matchup resolves {len(impact['resolved_issues'])} modeled conference parity issue(s).")
+        st.caption(f"Resolves {len(impact['resolved_issues'])} modeled parity issue(s).")
     if impact["new_issues"]:
-        st.warning(f"This matchup creates {len(impact['new_issues'])} modeled parity issue(s).")
+        st.warning(f"Creates {len(impact['new_issues'])} modeled parity issue(s).")
     if blocked:
-        st.caption("Conference guardrails prevent proposing this matchup as currently structured.")
+        st.caption("Blocked by current conference guardrails.")
     return blocked, impact
 
 
@@ -1308,18 +1460,148 @@ def try_counterproposal(
     return new_id, "A feasible revised transaction was created automatically."
 
 
+
+def render_app_header(
+    *,
+    eyebrow: str,
+    title: str,
+    subtitle: str,
+    season: int,
+    data_status: str,
+    status_class: str,
+    pending_count: int = 0,
+):
+    pending_chip = (
+        f'<span class="meta-chip">{pending_count} pending action{"s" if pending_count != 1 else ""}</span>'
+        if pending_count else ""
+    )
+    st.markdown(
+        f'<div class="app-header"><div><div class="app-eyebrow">{eyebrow}</div>'
+        f'<div class="app-title">{title}</div><div class="app-subtitle">{subtitle}</div></div>'
+        f'<div class="header-meta"><span class="meta-chip">{season}</span>'
+        f'<span class="meta-chip {status_class}">{data_status}</span>{pending_chip}</div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_entity_bar(name: str, meta: str):
+    st.markdown(
+        f'<div class="entity-bar"><div class="entity-avatar">{_team_initials(name)}</div>'
+        f'<div><div class="entity-name">{name}</div><div class="entity-meta">{meta}</div></div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_kpis(cards: List[Tuple[str, object, str]]):
+    items = []
+    for label, value, detail in cards:
+        items.append(
+            f'<div class="kpi-card"><div class="kpi-label">{label}</div>'
+            f'<div class="kpi-value">{value}</div><div class="kpi-detail">{detail}</div></div>'
+        )
+    st.markdown(f'<div class="kpi-grid">{"".join(items)}</div>', unsafe_allow_html=True)
+
+
+def render_empty(title: str, copy: str):
+    st.markdown(
+        f'<div class="empty-state"><div class="empty-title">{title}</div>'
+        f'<div class="empty-copy">{copy}</div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def transaction_activity_rows(transactions: List[Dict[str, object]], limit: int = 8) -> List[Tuple[str, str]]:
+    rows: List[Tuple[str, str]] = []
+    events: List[Tuple[str, str]] = []
+    for tx in transactions:
+        for item in tx.get("history", []):
+            at = str(item.get("at", ""))
+            actor = str(item.get("actor", "System"))
+            action = str(item.get("action", "")).replace("_", " ").title()
+            events.append((at, f"<strong>{actor}</strong> · {action}"))
+    events.sort(key=lambda x: x[0], reverse=True)
+    for at, text in events[:limit]:
+        try:
+            dt = datetime.fromisoformat(at.replace("Z", "+00:00"))
+            stamp = dt.strftime("%b %d · %H:%M")
+        except Exception:
+            stamp = "Recent"
+        rows.append((stamp, text))
+    return rows
+
+
+def render_activity_feed(transactions: List[Dict[str, object]], limit: int = 8):
+    rows = transaction_activity_rows(transactions, limit=limit)
+    if not rows:
+        render_empty("No recent activity", "Scheduling proposals and approvals will appear here.")
+        return
+    html = "".join(
+        f'<div class="activity-row"><div class="activity-time">{stamp}</div>'
+        f'<div class="activity-text">{text}</div></div>'
+        for stamp, text in rows
+    )
+    st.markdown(f'<div class="activity-list">{html}</div>', unsafe_allow_html=True)
+
+
+def render_parity_strip(engine: AdvancedNonConferenceOptimizer, conference: str, season: int):
+    parity_html = []
+    parity = {
+        week: engine.conference_parity(engine.store.copy_games(), int(season), week).get(conference, "")
+        for week in range(14)
+    }
+    for week in range(14):
+        state = str(parity.get(week, ""))
+        is_odd = state.startswith("ODD")
+        css = "odd" if is_odd else "even"
+        label = "ODD" if is_odd else "EVEN"
+        parity_html.append(
+            f'<div class="parity-week {css}"><div class="parity-num">W{display_week(week)}</div>'
+            f'<div class="parity-state">{label}</div></div>'
+        )
+    st.markdown(f'<div class="parity-strip">{"".join(parity_html)}</div>', unsafe_allow_html=True)
+
+
+def render_task_cards(active: str, cards: List[Tuple[str, str, str]]):
+    html = []
+    for title, subtitle, icon in cards:
+        css = " active" if active == title else ""
+        html.append(
+            f'<div class="task-card{css}"><div class="task-icon">{icon}</div>'
+            f'<div class="task-title">{title}</div><div class="task-sub">{subtitle}</div></div>'
+        )
+    st.markdown(f'<div class="task-grid">{"".join(html)}</div>', unsafe_allow_html=True)
+
+
+def school_transaction_sets(db: WorkspaceDB, school: str) -> Tuple[List[Dict[str, object]], List[Dict[str, object]]]:
+    relevant = [
+        item["payload"] for item in _tx_items(db)
+        if school in item["payload"].get("affected_schools", [])
+        or school == item["payload"].get("proposer")
+    ]
+    pending = [
+        tx for tx in relevant
+        if str(tx.get("status", "")).upper() == "PENDING"
+        and dict(tx.get("school_approvals", {})).get(school) == "PENDING"
+    ]
+    return relevant, pending
+
+
 # ------------------------ workspace / data ----------------------------
 
 db = get_db()
 
-st.markdown('<div class="simple-title">College Football Scheduling</div>', unsafe_allow_html=True)
-st.markdown(
-    '<div class="simple-sub">Solve the scheduling problem, coordinate every affected school, and collect unanimous approval in one place.</div>',
-    unsafe_allow_html=True,
-)
-
-top1, top2 = st.columns([1.2, 1])
-with top1:
+with st.sidebar:
+    st.markdown(
+        '<div class="sidebar-brand"><div class="sidebar-mark"><div class="sidebar-logo">S</div>'
+        '<div>Schedule OS</div></div><div class="sidebar-sub">College Football Scheduling</div></div>',
+        unsafe_allow_html=True,
+    )
+    perspective = st.radio(
+        "Workspace",
+        ["School", "Conference"],
+        key="desktop_workspace",
+    )
+    st.markdown('<div class="sidebar-section">Data</div>', unsafe_allow_html=True)
     data_mode = st.selectbox(
         "Schedule data",
         ["Public prototype", "Authoritative upload", "Demo"],
@@ -1337,16 +1619,15 @@ needs_df = pd.DataFrame()
 report_ok = True
 
 if data_mode == "Authoritative upload":
-    with st.expander("Authoritative schedule data", expanded=True):
+    snapshot = db.get("data_snapshot", "latest")
+    with st.sidebar:
+        uploaded = st.file_uploader("Upload authoritative workbook", type=["xlsx", "xlsm", "csv"])
         st.download_button(
-            "Download Excel template",
+            "Download import template",
             data=make_template_bytes(),
             file_name="college_football_schedule_template.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
         )
-        uploaded = st.file_uploader("Upload schedule", type=["xlsx", "xlsm", "csv"])
-
     if uploaded is not None:
         raw = uploaded.getvalue()
         if uploaded.name.lower().endswith(".csv"):
@@ -1362,8 +1643,6 @@ if data_mode == "Authoritative upload":
             st.error(e)
         for w in report.warnings:
             st.warning(w)
-        for msg in report.info:
-            st.caption(msg)
         if report.ok:
             db.put("data_snapshot", "latest", {
                 "teams": all_teams_df.to_dict("records"),
@@ -1373,20 +1652,28 @@ if data_mode == "Authoritative upload":
                 "source_name": uploaded.name,
                 "saved_at": datetime.now().isoformat(),
             })
+    elif snapshot:
+        all_teams_df = pd.DataFrame(snapshot.get("teams", []))
+        all_games_df = pd.DataFrame(snapshot.get("games", []))
+        slots_df = pd.DataFrame(snapshot.get("slots", []))
+        needs_df = pd.DataFrame(snapshot.get("needs", []))
     else:
-        snapshot = db.get("data_snapshot", "latest")
-        if snapshot:
-            all_teams_df = pd.DataFrame(snapshot.get("teams", []))
-            all_games_df = pd.DataFrame(snapshot.get("games", []))
-            slots_df = pd.DataFrame(snapshot.get("slots", []))
-            needs_df = pd.DataFrame(snapshot.get("needs", []))
-            st.caption(f"Using saved authoritative snapshot: {snapshot.get('source_name','latest')}")
-        else:
-            st.info("Upload the authoritative schedule workbook, or switch to Public prototype to explore immediately.")
-            st.stop()
+        render_app_header(
+            eyebrow="Schedule OS",
+            title="Connect authoritative schedule data",
+            subtitle="Upload the conference or school workbook to turn the optimizer into an operational scheduling workspace.",
+            season=2028,
+            data_status="No data loaded",
+            status_class="warn",
+        )
+        render_empty(
+            "Authoritative schedule required",
+            "Use the left navigation to upload a workbook, or switch to Public prototype to explore the product.",
+        )
+        st.stop()
 
 elif data_mode == "Public prototype":
-    with st.spinner("Loading public future-opponent data…"):
+    with st.spinner("Loading schedule intelligence…"):
         public_teams_df, public_games_df, scrape_errors = scrape_fbschedules_public(tuple(range(2027, 2038)))
     all_teams_df = public_teams_df
     all_games_df = public_games_df
@@ -1403,7 +1690,7 @@ if not available_years:
     st.error("No seasons are available in the current data.")
     st.stop()
 
-with top2:
+with st.sidebar:
     default_year = 2028 if 2028 in available_years else available_years[0]
     season = st.selectbox("Active season", available_years, index=available_years.index(default_year))
 
@@ -1420,103 +1707,179 @@ store = enrich_store_with_db_needs(store, db, int(season))
 engine = AdvancedNonConferenceOptimizer(store, time_limit_seconds=6.0)
 status_text, status_class = data_label(data_mode, report_ok)
 policies = all_conference_policies(db, store)
-
-st.markdown(
-    f'<div style="text-align:center;margin:2px 0 20px">'
-    f'<span class="data-pill {status_class}">● {status_text}</span></div>',
-    unsafe_allow_html=True,
-)
-
-if not db.durable:
-    st.caption("Pilot persistence is local SQLite. Add DATABASE_URL for durable school needs, proposals and audit history.")
-
-
-# ------------------------------ UI -----------------------------------
-
-perspective = st.radio(
-    "Workspace",
-    ["School", "Conference"],
-    horizontal=True,
-    label_visibility="collapsed",
-)
-
 season_games = sorted(list(store.games.values()), key=lambda g: (g.week, g.home_team, g.away_team))
 all_team_names = sorted(store.teams.keys())
+authoritative = data_mode == "Authoritative upload" and report_ok
 
 if perspective == "School":
     school_names = all_team_names
     default_school = school_names.index("Georgia") if "Georgia" in school_names else 0
-    acting_school = st.selectbox("School", school_names, index=default_school)
-
-    st.markdown(f'<div class="page-title">{acting_school}</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="page-copy">Your schedule, your needs, and every proposal requiring your approval.</div>',
-        unsafe_allow_html=True,
-    )
-
-    tab_schedule, tab_solve, tab_needs, tab_proposals = st.tabs([
-        "My Schedule", "Solve", "Needs & Opportunities", "Proposals"
-    ])
-
-    with tab_schedule:
-        profile_rules = persistent_profile_rules(db, acting_school)
-        if profile_rules:
-            st.caption(f"{len(profile_rules)} saved scheduling rule{'s' if len(profile_rules) != 1 else ''}")
-        render_all_years(all_games_df, acting_school)
-
-    with tab_solve:
-        outcome = st.radio(
-            "What do you need to accomplish?",
-            ["Move a game", "Make my school open", "Find a buy game", "Find an A4 opponent"],
-            horizontal=True,
+    with st.sidebar:
+        st.markdown('<div class="sidebar-section">Institution</div>', unsafe_allow_html=True)
+        acting_school = st.selectbox("School", school_names, index=default_school)
+        st.markdown('<div class="sidebar-section">Navigation</div>', unsafe_allow_html=True)
+        navigation = st.radio(
+            "Navigation",
+            ["Overview", "Schedule", "Solve", "Needs", "Proposals"],
+            label_visibility="collapsed",
+            key="school_nav",
         )
-        acting_conf = store.teams.get(acting_school).conference if acting_school in store.teams else ""
-        preserve_parity = bool(conference_policy(db, acting_conf).get("enforce_no_new_parity", True)) if acting_conf else False
 
-        if outcome == "Move a game":
+    relevant_tx, pending_tx = school_transaction_sets(db, acting_school)
+    team_obj = store.teams.get(acting_school)
+    team_meta = (
+        f"{team_obj.conference} · {team_obj.subdivision} · {season}"
+        if team_obj else str(season)
+    )
+    render_app_header(
+        eyebrow="School workspace",
+        title=navigation,
+        subtitle={
+            "Overview": "Everything that requires your attention, in one place.",
+            "Schedule": "One authoritative view of current and future non-conference commitments.",
+            "Solve": "Define the outcome. The optimizer coordinates the affected schedules.",
+            "Needs": "Publish what you need and surface compatible scheduling inventory.",
+            "Proposals": "Review, negotiate and approve coordinated schedule changes.",
+        }[navigation],
+        season=int(season),
+        data_status=status_text,
+        status_class=status_class,
+        pending_count=len(pending_tx),
+    )
+    render_entity_bar(acting_school, team_meta)
+
+    if navigation == "Overview":
+        current_commitments = len([g for g in store.games.values() if g.involves(acting_school)])
+        current_needs = db_need_records(db, season=int(season), school=acting_school)
+        rules = persistent_profile_rules(db, acting_school)
+        render_kpis([
+            ("Known commitments", current_commitments, f"{season} modeled schedule"),
+            ("Open needs", len(current_needs), "buy game / A4 market"),
+            ("Needs your decision", len(pending_tx), "pending proposals"),
+            ("Scheduling rules", len(rules), "institutional profile"),
+        ])
+
+        if pending_tx:
+            st.markdown('<div class="section-heading">Needs your attention</div>', unsafe_allow_html=True)
+            st.markdown('<div class="section-copy">These proposals are waiting on your decision.</div>', unsafe_allow_html=True)
+            for tx in pending_tx[:3]:
+                transaction_card(tx, acting_school)
+
+        st.markdown('<div class="section-heading">Active season</div>', unsafe_allow_html=True)
+        render_schedule_strip(
+            all_games_df, acting_school, int(season),
+            authoritative=authoritative,
+            title=f"{acting_school} · {season}",
+        )
+
+        left, right = st.columns([1.3, .7])
+        with left:
+            st.markdown('<div class="section-heading">Recent activity</div>', unsafe_allow_html=True)
+            render_activity_feed(relevant_tx, limit=7)
+        with right:
+            st.markdown('<div class="section-heading">Institutional profile</div>', unsafe_allow_html=True)
+            with st.container(border=True):
+                if rules:
+                    for rule in rules[:6]:
+                        st.caption("• " + rule_summary(rule))
+                else:
+                    st.caption("No persistent scheduling rules saved yet.")
+
+    elif navigation == "Schedule":
+        st.markdown('<div class="section-heading">Active schedule</div>', unsafe_allow_html=True)
+        render_schedule_strip(
+            all_games_df, acting_school, int(season),
+            authoritative=authoritative,
+            title=f"{acting_school} · {season}",
+        )
+        st.markdown('<div class="section-heading">Future commitments</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-copy">Every loaded year on one page. Scroll each season horizontally for the complete 14-week view.</div>', unsafe_allow_html=True)
+        render_all_years(all_games_df, acting_school, authoritative=authoritative)
+
+    elif navigation == "Solve":
+        acting_conf = team_obj.conference if team_obj else ""
+        preserve_parity = bool(
+            conference_policy(db, acting_conf).get("enforce_no_new_parity", True)
+        ) if acting_conf else False
+
+        if "desktop_solve_mode" not in st.session_state:
+            st.session_state["desktop_solve_mode"] = "Move a game"
+        active_mode = st.session_state["desktop_solve_mode"]
+
+        task_cards = [
+            ("Move a game", "Rework an existing commitment", "↔"),
+            ("Open a week", "Find the lowest-disruption path", "□"),
+            ("Find a buy game", "Match compatible guarantee inventory", "$"),
+            ("Find an A4 opponent", "Find compatible A4 inventory", "A4"),
+        ]
+        render_task_cards(active_mode, task_cards)
+
+        bcols = st.columns(4)
+        for i, (title, _, _) in enumerate(task_cards):
+            with bcols[i]:
+                if st.button(
+                    "Select" if active_mode != title else "Selected",
+                    key=f"select_task_{title}",
+                    use_container_width=True,
+                    disabled=active_mode == title,
+                ):
+                    st.session_state["desktop_solve_mode"] = title
+                    st.rerun()
+
+        st.markdown('<div class="section-heading">Configure outcome</div>', unsafe_allow_html=True)
+
+        if active_mode == "Move a game":
             school_games = [
                 g for g in season_games
                 if g.involves(acting_school) and str(g.game_type).upper() != "CONFERENCE"
             ]
             if not school_games:
-                st.info("No dated non-conference games are available to move in the active season.")
+                render_empty("No movable games", "No dated non-conference commitments are available in the active season.")
             else:
-                labels = {game_label(g): g for g in school_games}
-                selected_game = labels[st.selectbox("Game", list(labels.keys()), key=f"solve_move_game_{acting_school}")]
-                target_display = st.selectbox(
-                    "Move to", list(range(1, 15)), index=int(selected_game.week),
-                    key=f"solve_move_week_{acting_school}",
-                )
-                target_week = internal_week(target_display)
+                with st.container(border=True):
+                    c1, c2 = st.columns([1.5, .7])
+                    labels = {game_label(g): g for g in school_games}
+                    with c1:
+                        selected_game = labels[st.selectbox(
+                            "Game", list(labels.keys()), key=f"premium_move_game_{acting_school}"
+                        )]
+                    with c2:
+                        target_display = st.selectbox(
+                            "Move to", list(range(1, 15)), index=int(selected_game.week),
+                            key=f"premium_move_week_{acting_school}",
+                        )
+                    target_week = internal_week(target_display)
 
-                with st.expander("Constraints & preferences", expanded=False):
-                    rules, protected_ids, avoid_ids, context = constraint_builder(
-                        db,
-                        prefix=f"solve_move_{season}_{acting_school}_{selected_game.game_id}",
-                        primary_team=acting_school,
-                        teams=all_team_names,
-                        games=[g for g in season_games if g.game_id != selected_game.game_id],
-                    )
+                    with st.expander("Constraints & preferences", expanded=False):
+                        rules, protected_ids, avoid_ids, context = constraint_builder(
+                            db,
+                            prefix=f"premium_move_{season}_{acting_school}_{selected_game.game_id}",
+                            primary_team=acting_school,
+                            teams=all_team_names,
+                            games=[g for g in season_games if g.game_id != selected_game.game_id],
+                        )
 
-                if st.button("Solve", type="primary", use_container_width=True, key=f"solve_move_{acting_school}"):
-                    run_store = store_with_locked(store, protected_ids)
-                    run_engine = AdvancedNonConferenceOptimizer(run_store, time_limit_seconds=6.0)
-                    intent = build_move_intent(selected_game, target_week, rules, avoid_ids, context, preserve_parity)
-                    with st.spinner("Looking across every affected schedule…"):
-                        results = run_engine.solve_move_game(intent)
-                    st.session_state[f"solve_result_{acting_school}"] = {
-                        "result": results[0] if results else None,
-                        "intent": intent,
-                        "protected": protected_ids,
-                        "context": context,
-                        "objective": {
-                            "type": "MOVE_GAME",
-                            "game_id": selected_game.game_id,
-                            "requested_week": target_week,
-                        },
-                    }
+                    if st.button("Find best path", type="primary", key=f"premium_solve_move_{acting_school}"):
+                        run_store = store_with_locked(store, protected_ids)
+                        run_engine = AdvancedNonConferenceOptimizer(run_store, time_limit_seconds=6.0)
+                        intent = build_move_intent(
+                            selected_game, target_week, rules, avoid_ids, context, preserve_parity
+                        )
+                        with st.spinner("Evaluating coordinated repair paths…"):
+                            results = run_engine.solve_move_game(intent)
+                        st.session_state[f"premium_result_{acting_school}"] = {
+                            "result": results[0] if results else None,
+                            "intent": intent,
+                            "protected": protected_ids,
+                            "context": context,
+                            "objective": {
+                                "type": "MOVE_GAME",
+                                "game_id": selected_game.game_id,
+                                "requested_week": target_week,
+                            },
+                        }
 
-                state = st.session_state.get(f"solve_result_{acting_school}")
+                state = st.session_state.get(f"premium_result_{acting_school}")
                 if state:
                     sol = state.get("result")
                     run_store = store_with_locked(store, set(state.get("protected") or set()))
@@ -1524,496 +1887,517 @@ if perspective == "School":
                     if sol:
                         render_result(run_engine, sol, season=int(season), data_status=status_text)
                         render_school_impacts(sol)
-                        if st.button("Send coordinated proposal", type="primary", use_container_width=True, key=f"send_move_{acting_school}"):
-                            payload = transaction_from_solution(
-                                sol=sol,
-                                proposer=acting_school,
-                                season=int(season),
-                                data_status=status_text,
-                                store=run_store,
-                                conference_policies=policies,
-                                context=str(state.get("context", "")),
-                                objective=state.get("objective"),
-                                rules=list(state.get("intent").rules or []),
-                            )
-                            tx_id = _tx_create(db, payload)
-                            _tx_action(
-            db,
-                                tx_id, actor=acting_school, action="SENT_TO_AFFECTED_SCHOOLS",
-                                note="Unanimous school approval requested."
-                            )
-                            st.success(f"Proposal {tx_id} sent to every affected school.")
-                    else:
-                        st.error("No feasible path satisfies the current school and conference rules.")
-
-        elif outcome == "Make my school open":
-            open_display = st.selectbox("I need to be open in", list(range(1, 15)), key=f"open_week_{acting_school}")
-            open_week = internal_week(open_display)
-            occupied = store.game_for_team_week(store.copy_games(), acting_school, int(season), open_week)
-            if occupied is None:
-                st.success(f"{acting_school} is already open in Week {open_display}.")
-            elif str(occupied.game_type).upper() == "CONFERENCE":
-                st.error("That week contains a conference game and cannot be repaired through the nonconference workflow.")
-            else:
-                st.markdown(f"Current conflict: **{occupied.away_team} @ {occupied.home_team}**")
-                rules = rules_for_schools(db, [acting_school])
-                if st.button("Find easiest way to open this week", type="primary", use_container_width=True):
-                    with st.spinner("Searching the smallest relocation chain…"):
-                        answer = easiest_relocation(
-                            store, occupied, rules=rules, preserve_parity=preserve_parity
-                        )
-                    st.session_state[f"open_result_{acting_school}"] = answer
-                answer = st.session_state.get(f"open_result_{acting_school}")
-                if answer:
-                    destination, sol = answer
-                    st.markdown(
-                        f'<div class="outcome-note">Best path moves the current game to <strong>Week {display_week(destination)}</strong>.</div>',
-                        unsafe_allow_html=True,
-                    )
-                    render_result(engine, sol, season=int(season), data_status=status_text)
-                    render_school_impacts(sol)
-                    if st.button("Send coordinated proposal", type="primary", use_container_width=True, key=f"send_open_{acting_school}"):
-                        payload = transaction_from_solution(
-                            sol=sol,
-                            proposer=acting_school,
-                            season=int(season),
-                            data_status=status_text,
-                            store=store,
-                            conference_policies=policies,
-                            objective={"type": "MAKE_SCHOOL_OPEN", "school": acting_school, "week": open_week},
-                            rules=rules,
-                        )
-                        tx_id = _tx_create(db, payload)
-                        st.success(f"Proposal {tx_id} sent to every affected school.")
-
-        else:
-            match_type = "BUY_GAME" if outcome == "Find a buy game" else "A4"
-            if match_type == "A4" and not store.teams[acting_school].is_a4:
-                st.warning("This school is not classified as A4 in the current data.")
-            else:
-                week_choice = st.selectbox(
-                    "Week",
-                    ["Best available"] + list(range(1, 15)),
-                    key=f"market_week_{acting_school}_{match_type}",
-                )
-                target_week = None if week_choice == "Best available" else internal_week(int(week_choice))
-                location = st.selectbox(
-                    "Site preference",
-                    ["HOME", "ANY", "AWAY"] if match_type == "A4" else ["HOME", "ANY"],
-                    key=f"market_location_{acting_school}_{match_type}",
-                )
-                max_guarantee = None
-                if match_type == "BUY_GAME":
-                    max_guarantee = st.number_input(
-                        "Maximum guarantee (optional)",
-                        min_value=0, value=0, step=50000,
-                        key=f"market_guarantee_{acting_school}",
-                    )
-                    if max_guarantee == 0:
-                        max_guarantee = None
-
-                st.markdown(
-                    '<div class="outcome-note">Weeks 1–4 receive a market-liquidity preference when all else is equal. Later weeks remain valid.</div>',
-                    unsafe_allow_html=True,
-                )
-
-                if st.button("Find best matches", type="primary", use_container_width=True, key=f"find_market_{acting_school}_{match_type}"):
-                    intent = Intent(
-                        action="FIND_BUY_GAME" if match_type == "BUY_GAME" else "FIND_A4_GAME",
-                        season=int(season),
-                        target_week=target_week,
-                        team_a=acting_school,
-                        location=location,
-                        max_guarantee=max_guarantee,
-                    )
-                    results = engine.solve(intent)
-                    st.session_state[f"market_results_{acting_school}_{match_type}"] = results
-
-                results = st.session_state.get(f"market_results_{acting_school}_{match_type}", [])
-                if results:
-                    for idx, match in enumerate(results[:8]):
-                        blocked, impact = market_result_card(
-                            match, store=store, season=int(season), policies=policies
-                        )
-                        if not blocked:
+                        action_cols = st.columns([.7, .3])
+                        with action_cols[0]:
                             if st.button(
-                                "Propose matchup",
+                                "Send coordinated proposal",
+                                type="primary",
                                 use_container_width=True,
-                                key=f"propose_match_{acting_school}_{match_type}_{idx}",
+                                key=f"premium_send_move_{acting_school}",
                             ):
-                                payload = transaction_from_match(
-                                    match=match,
+                                payload = transaction_from_solution(
+                                    sol=sol,
                                     proposer=acting_school,
                                     season=int(season),
                                     data_status=status_text,
-                                    store=store,
+                                    store=run_store,
                                     conference_policies=policies,
-                                    need_type=match_type,
+                                    context=str(state.get("context", "")),
+                                    objective=state.get("objective"),
+                                    rules=list(state.get("intent").rules or []),
                                 )
                                 tx_id = _tx_create(db, payload)
-                                st.success(f"Proposal {tx_id} sent to {match.metadata.get('candidate')}.")
+                                _tx_action(
+                                    db, tx_id, actor=acting_school,
+                                    action="SENT_TO_AFFECTED_SCHOOLS",
+                                    note="Unanimous school approval requested.",
+                                )
+                                st.success("Proposal sent.")
+                        with action_cols[1]:
+                            if st.button(
+                                "Other options",
+                                use_container_width=True,
+                                key=f"premium_alts_{acting_school}",
+                            ):
+                                with st.spinner("Testing alternate tradeoffs…"):
+                                    st.session_state[f"premium_alts_results_{acting_school}"] = run_engine.solve_move_game_alternatives(state["intent"], sol)
+                        for alt in st.session_state.get(f"premium_alts_results_{acting_school}", []):
+                            render_result(
+                                run_engine, alt, season=int(season), data_status=status_text,
+                                label=str((alt.metadata or {}).get("strategy_label", "ALTERNATIVE")).upper()
+                            )
+                    else:
+                        st.error("No feasible path satisfies the current school and conference rules.")
 
-    with tab_needs:
-        st.markdown("### Tell the market what you need")
-        st.caption("Explicit school needs make matching much stronger than inferring an open date.")
-        need_type_label = st.selectbox(
-            "Need",
-            ["FCS buy game", "A4 opponent"],
-            key=f"need_type_{acting_school}",
-        )
-        need_type = "FCS_BUY" if need_type_label == "FCS buy game" else "A4"
-        need_year = st.selectbox(
-            "Season",
-            available_years,
-            index=available_years.index(season),
-            key=f"need_year_{acting_school}",
-        )
-        need_weeks = st.multiselect(
-            "Acceptable weeks",
-            list(range(1, 15)),
-            default=[1, 2, 3, 4],
-            key=f"need_weeks_{acting_school}",
-        )
-        need_location = st.selectbox(
-            "Location",
-            ["HOME", "ANY", "AWAY"],
-            key=f"need_location_{acting_school}",
-        )
-        min_g = max_g = None
-        if need_type == "FCS_BUY":
-            g1, g2 = st.columns(2)
-            with g1:
-                min_value = st.number_input(
-                    "Minimum guarantee (optional)", min_value=0, value=0, step=50000,
-                    key=f"need_min_g_{acting_school}",
+        elif active_mode == "Open a week":
+            with st.container(border=True):
+                open_display = st.selectbox(
+                    "Week that must be open", list(range(1, 15)), key=f"premium_open_week_{acting_school}"
                 )
-            with g2:
-                max_value = st.number_input(
-                    "Maximum guarantee (optional)", min_value=0, value=0, step=50000,
-                    key=f"need_max_g_{acting_school}",
+                open_week = internal_week(open_display)
+                occupied = store.game_for_team_week(
+                    store.copy_games(), acting_school, int(season), open_week
                 )
-            min_g = None if min_value == 0 else int(min_value)
-            max_g = None if max_value == 0 else int(max_value)
-        need_notes = st.text_input("Notes (optional)", key=f"need_notes_{acting_school}")
-        if st.button("Publish need", type="primary", use_container_width=True, key=f"publish_need_{acting_school}"):
-            if not need_weeks:
-                st.warning("Choose at least one acceptable week.")
-            else:
-                save_school_need(
-                    db, team=acting_school, season=int(need_year),
-                    display_weeks=need_weeks, need_type=need_type,
-                    location=need_location, min_guarantee=min_g,
-                    max_guarantee=max_g, notes=need_notes,
-                )
-                st.success("Need published to the scheduling market.")
-                st.rerun()
+                if occupied is None:
+                    st.success(f"{acting_school} is already open in Week {open_display}.")
+                elif str(occupied.game_type).upper() == "CONFERENCE":
+                    st.error("That week contains a conference game.")
+                else:
+                    st.caption(f"Current conflict · {occupied.away_team} @ {occupied.home_team}")
+                    rules = rules_for_schools(db, [acting_school])
+                    if st.button("Find easiest path", type="primary", key=f"premium_open_solve_{acting_school}"):
+                        with st.spinner("Searching the lowest-disruption relocation chain…"):
+                            st.session_state[f"premium_open_result_{acting_school}"] = easiest_relocation(
+                                store, occupied, rules=rules, preserve_parity=preserve_parity
+                            )
+            answer = st.session_state.get(f"premium_open_result_{acting_school}")
+            if answer:
+                destination, sol = answer
+                render_result(engine, sol, season=int(season), data_status=status_text)
+                render_school_impacts(sol)
+                if st.button("Send coordinated proposal", type="primary", key=f"premium_send_open_{acting_school}"):
+                    payload = transaction_from_solution(
+                        sol=sol,
+                        proposer=acting_school,
+                        season=int(season),
+                        data_status=status_text,
+                        store=store,
+                        conference_policies=policies,
+                        objective={"type": "MAKE_SCHOOL_OPEN", "school": acting_school, "week": open_week},
+                        rules=rules,
+                    )
+                    _tx_create(db, payload)
+                    st.success("Proposal sent.")
 
-        current_needs = db_need_records(db, school=acting_school)
-        if current_needs:
-            st.markdown("### Open needs")
-            need_rows = [{
-                "Season": n["season"],
-                "Week": display_week(int(n["week"])),
-                "Need": n["need_type"],
-                "Location": n["location"],
-                "Min guarantee": n.get("min_guarantee"),
-                "Max guarantee": n.get("max_guarantee"),
-            } for n in current_needs]
-            st.dataframe(pd.DataFrame(need_rows), use_container_width=True, hide_index=True)
-
-    with tab_proposals:
-        relevant = [
-            item["payload"] for item in _tx_items(db)
-            if acting_school in item["payload"].get("affected_schools", [])
-            or acting_school == item["payload"].get("proposer")
-        ]
-        if not relevant:
-            st.info("No proposals involve this school yet.")
         else:
-            for tx in relevant:
+            match_type = "BUY_GAME" if active_mode == "Find a buy game" else "A4"
+            if match_type == "A4" and team_obj and not team_obj.is_a4:
+                st.warning("This school is not classified as A4 in the current data.")
+            else:
+                with st.container(border=True):
+                    c1, c2, c3 = st.columns([1,1,1])
+                    with c1:
+                        week_choice = st.selectbox(
+                            "Week", ["Best available"] + list(range(1, 15)),
+                            key=f"premium_market_week_{acting_school}_{match_type}",
+                        )
+                    target_week = None if week_choice == "Best available" else internal_week(int(week_choice))
+                    with c2:
+                        location = st.selectbox(
+                            "Site preference",
+                            ["HOME", "ANY", "AWAY"] if match_type == "A4" else ["HOME", "ANY"],
+                            key=f"premium_market_location_{acting_school}_{match_type}",
+                        )
+                    max_guarantee = None
+                    with c3:
+                        if match_type == "BUY_GAME":
+                            guarantee_value = st.number_input(
+                                "Maximum guarantee", min_value=0, value=0, step=50000,
+                                key=f"premium_market_guarantee_{acting_school}",
+                            )
+                            max_guarantee = None if guarantee_value == 0 else int(guarantee_value)
+                        else:
+                            st.caption("Weeks 1–4 receive a soft market preference.")
+                    if st.button("Find best matches", type="primary", key=f"premium_find_market_{acting_school}_{match_type}"):
+                        intent = Intent(
+                            action="FIND_BUY_GAME" if match_type == "BUY_GAME" else "FIND_A4_GAME",
+                            season=int(season), target_week=target_week, team_a=acting_school,
+                            location=location, max_guarantee=max_guarantee,
+                        )
+                        st.session_state[f"premium_market_results_{acting_school}_{match_type}"] = engine.solve(intent)
+
+                results = st.session_state.get(f"premium_market_results_{acting_school}_{match_type}", [])
+                if results:
+                    st.markdown('<div class="section-heading">Best matches</div>', unsafe_allow_html=True)
+                    for idx, match in enumerate(results[:8]):
+                        blocked, _ = market_result_card(
+                            match, store=store, season=int(season), policies=policies
+                        )
+                        if not blocked and st.button(
+                            "Propose matchup",
+                            key=f"premium_propose_match_{acting_school}_{match_type}_{idx}",
+                        ):
+                            payload = transaction_from_match(
+                                match=match, proposer=acting_school, season=int(season),
+                                data_status=status_text, store=store,
+                                conference_policies=policies, need_type=match_type,
+                            )
+                            _tx_create(db, payload)
+                            st.success("Proposal sent.")
+
+    elif navigation == "Needs":
+        open_needs = db_need_records(db, school=acting_school)
+        left, right = st.columns([1.25, .75])
+        with left:
+            st.markdown('<div class="section-heading">Open needs</div>', unsafe_allow_html=True)
+            if open_needs:
+                rows = [{
+                    "Season": n["season"],
+                    "Week": display_week(int(n["week"])),
+                    "Need": n["need_type"],
+                    "Site": n["location"],
+                    "Min guarantee": n.get("min_guarantee"),
+                    "Max guarantee": n.get("max_guarantee"),
+                } for n in open_needs]
+                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            else:
+                render_empty("No open needs", "Publish a buy-game or A4 need when you are ready.")
+        with right:
+            st.markdown('<div class="section-heading">Publish need</div>', unsafe_allow_html=True)
+            with st.container(border=True):
+                need_type_label = st.selectbox(
+                    "Need", ["FCS buy game", "A4 opponent"], key=f"premium_need_type_{acting_school}"
+                )
+                need_type = "FCS_BUY" if need_type_label == "FCS buy game" else "A4"
+                need_year = st.selectbox(
+                    "Season", available_years, index=available_years.index(season),
+                    key=f"premium_need_year_{acting_school}",
+                )
+                need_weeks = st.multiselect(
+                    "Acceptable weeks", list(range(1, 15)), default=[1,2,3,4],
+                    key=f"premium_need_weeks_{acting_school}",
+                )
+                need_location = st.selectbox(
+                    "Location", ["HOME","ANY","AWAY"], key=f"premium_need_location_{acting_school}"
+                )
+                min_g = max_g = None
+                if need_type == "FCS_BUY":
+                    min_value = st.number_input(
+                        "Minimum guarantee", min_value=0, value=0, step=50000,
+                        key=f"premium_need_min_{acting_school}",
+                    )
+                    max_value = st.number_input(
+                        "Maximum guarantee", min_value=0, value=0, step=50000,
+                        key=f"premium_need_max_{acting_school}",
+                    )
+                    min_g = None if min_value == 0 else int(min_value)
+                    max_g = None if max_value == 0 else int(max_value)
+                notes = st.text_input("Notes", key=f"premium_need_notes_{acting_school}")
+                if st.button("Publish need", type="primary", use_container_width=True):
+                    if not need_weeks:
+                        st.warning("Choose at least one week.")
+                    else:
+                        save_school_need(
+                            db, team=acting_school, season=int(need_year),
+                            display_weeks=need_weeks, need_type=need_type,
+                            location=need_location, min_guarantee=min_g,
+                            max_guarantee=max_g, notes=notes,
+                        )
+                        st.success("Need published.")
+                        st.rerun()
+
+    elif navigation == "Proposals":
+        if not relevant_tx:
+            render_empty("You're all caught up", "No scheduling proposals involve this school.")
+        else:
+            pending = [tx for tx in relevant_tx if str(tx.get("status","")).upper() == "PENDING"]
+            history = [tx for tx in relevant_tx if str(tx.get("status","")).upper() != "PENDING"]
+            if pending:
+                st.markdown('<div class="section-heading">Active proposals</div>', unsafe_allow_html=True)
+            for tx in pending:
                 tx_id = str(tx.get("transaction_id"))
                 transaction_card(tx, acting_school)
-                status = str(tx.get("status", "PENDING")).upper()
                 approvals = dict(tx.get("school_approvals", {}))
                 my_status = approvals.get(acting_school)
 
-                if status == "PENDING" and my_status == "PENDING":
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        if st.button("Accept", type="primary", use_container_width=True, key=f"accept_{tx_id}_{acting_school}"):
+                if my_status == "PENDING":
+                    a1, a2, a3 = st.columns([1,1,1.2])
+                    with a1:
+                        if st.button("Accept", type="primary", use_container_width=True, key=f"premium_accept_{tx_id}_{acting_school}"):
                             updated = _tx_school_approval(db, tx_id, acting_school, "ACCEPTED")
                             if updated and updated.get("status") == "COMPLETED":
-                                st.success("Unanimous approval complete. The schedule has been updated.")
-                            else:
-                                st.success("Accepted. Waiting on the remaining schools.")
+                                st.success("Unanimous approval complete.")
                             st.rerun()
-                    with c2:
-                        if st.button("Reject", use_container_width=True, key=f"reject_toggle_{tx_id}_{acting_school}"):
-                            st.session_state[f"show_reject_{tx_id}_{acting_school}"] = True
+                    with a2:
+                        if st.button("Reject", use_container_width=True, key=f"premium_reject_toggle_{tx_id}_{acting_school}"):
+                            st.session_state[f"premium_show_reject_{tx_id}_{acting_school}"] = True
+                    with a3:
+                        if st.button("Suggest another week", use_container_width=True, key=f"premium_counter_toggle_{tx_id}_{acting_school}"):
+                            st.session_state[f"premium_show_counter_{tx_id}_{acting_school}"] = True
 
-                    if st.session_state.get(f"show_reject_{tx_id}_{acting_school}"):
-                        reason = st.selectbox(
-                            "Why doesn't it work?",
-                            ["Coach preference", "Contract issue", "Travel issue", "Game cannot move", "Financial issue", "Other"],
-                            key=f"reject_reason_{tx_id}_{acting_school}",
-                        )
-                        note = st.text_input("Detail", key=f"reject_note_{tx_id}_{acting_school}")
-                        if st.button("Confirm rejection", use_container_width=True, key=f"confirm_reject_{tx_id}_{acting_school}"):
-                            _tx_school_approval(db, tx_id, acting_school, "REJECTED", f"{reason}: {note}")
-                            db.add_feedback(
-                                season=int(tx.get("season")),
-                                team=acting_school,
-                                game_id="",
-                                reason=reason,
-                                notes=note,
-                                payload=tx,
+                    if st.session_state.get(f"premium_show_reject_{tx_id}_{acting_school}"):
+                        with st.container(border=True):
+                            reason = st.selectbox(
+                                "Why doesn't it work?",
+                                ["Coach preference","Contract issue","Travel issue","Game cannot move","Financial issue","Other"],
+                                key=f"premium_reject_reason_{tx_id}_{acting_school}",
                             )
-                            st.rerun()
-
-                    with st.expander("Suggest another week", expanded=False):
-                        relevant_moves = [
-                            m for m in tx.get("moves", [])
-                            if acting_school in {m.get("home_team"), m.get("away_team")}
-                        ]
-                        additions = [
-                            g for g in tx.get("add_games", [])
-                            if acting_school in {g.get("home_team"), g.get("away_team")}
-                        ]
-                        options = {}
-                        for m in relevant_moves:
-                            options[f"{m['away_team']} @ {m['home_team']}"] = str(m["game_id"])
-                        for g in additions:
-                            options[f"{g['away_team']} @ {g['home_team']} (new game)"] = str(g["game_id"])
-                        if options:
-                            chosen_label = st.selectbox("Game", list(options.keys()), key=f"counter_game_{tx_id}_{acting_school}")
-                            alt_display = st.selectbox("Suggested week", list(range(1, 15)), key=f"counter_week_{tx_id}_{acting_school}")
-                            alt_note = st.text_input("Why?", key=f"counter_note_{tx_id}_{acting_school}")
-                            if st.button("Test and send counterproposal", type="primary", use_container_width=True, key=f"counter_send_{tx_id}_{acting_school}"):
-                                new_id, message = try_counterproposal(
-                                    tx=tx,
-                                    school=acting_school,
-                                    game_id=options[chosen_label],
-                                    requested_week=internal_week(alt_display),
-                                    store=store,
-                                    db=db,
-                                    policies=policies,
-                                    data_status=status_text,
+                            note = st.text_input("Detail", key=f"premium_reject_note_{tx_id}_{acting_school}")
+                            if st.button("Confirm rejection", key=f"premium_confirm_reject_{tx_id}_{acting_school}"):
+                                _tx_school_approval(db, tx_id, acting_school, "REJECTED", f"{reason}: {note}")
+                                db.add_feedback(
+                                    season=int(tx.get("season")), team=acting_school,
+                                    game_id="", reason=reason, notes=note, payload=tx,
                                 )
-                                if new_id:
-                                    st.success(message)
-                                    st.rerun()
-                                else:
-                                    st.error(message)
+                                st.rerun()
 
-                elif status == "PENDING" and my_status == "ACCEPTED":
-                    st.caption("You have accepted. Waiting on the remaining affected schools.")
-                elif status == "COMPLETED":
-                    st.success("Completed — unanimous approval is on record and the schedule is updated.")
-                    text = confirmation_text(tx)
+                    if st.session_state.get(f"premium_show_counter_{tx_id}_{acting_school}"):
+                        with st.container(border=True):
+                            relevant_moves = [
+                                m for m in tx.get("moves", [])
+                                if acting_school in {m.get("home_team"), m.get("away_team")}
+                            ]
+                            additions = [
+                                g for g in tx.get("add_games", [])
+                                if acting_school in {g.get("home_team"), g.get("away_team")}
+                            ]
+                            options = {}
+                            for m in relevant_moves:
+                                options[f"{m['away_team']} @ {m['home_team']}"] = str(m["game_id"])
+                            for g in additions:
+                                options[f"{g['away_team']} @ {g['home_team']} (new)"] = str(g["game_id"])
+                            if options:
+                                chosen = st.selectbox("Game", list(options.keys()), key=f"premium_counter_game_{tx_id}")
+                                alt_display = st.selectbox("Suggested week", list(range(1,15)), key=f"premium_counter_week_{tx_id}")
+                                alt_note = st.text_input("Why?", key=f"premium_counter_note_{tx_id}")
+                                if st.button("Test counterproposal", type="primary", key=f"premium_counter_send_{tx_id}"):
+                                    new_id, message = try_counterproposal(
+                                        tx=tx, school=acting_school, game_id=options[chosen],
+                                        requested_week=internal_week(alt_display), store=store,
+                                        db=db, policies=policies, data_status=status_text,
+                                    )
+                                    if new_id:
+                                        st.success(message)
+                                        st.rerun()
+                                    else:
+                                        st.error(message)
+
+                if str(tx.get("status","")).upper() == "COMPLETED":
                     with st.expander("Approval confirmation", expanded=False):
-                        st.text_area("Reply-all equivalent", value=text, height=200, disabled=True, key=f"confirm_text_{tx_id}")
-                        st.download_button(
-                            "Download confirmation",
-                            data=text.encode("utf-8"),
-                            file_name=f"{tx_id}_approval_confirmation.txt",
-                            mime="text/plain",
-                            key=f"download_confirmation_{tx_id}",
-                        )
-                elif status == "SUPERSEDED":
-                    st.caption("Superseded by a revised proposal.")
-                elif status == "REJECTED":
-                    st.error("This proposal was rejected.")
+                        text = confirmation_text(tx)
+                        st.text_area("Reply-all equivalent", value=text, height=180, disabled=True, key=f"premium_confirm_{tx_id}")
 
-                with st.expander("Audit history", expanded=False):
-                    history = list(tx.get("history", []))
-                    if history:
-                        st.dataframe(pd.DataFrame(history), use_container_width=True, hide_index=True)
+            if history:
+                st.markdown('<div class="section-heading">History</div>', unsafe_allow_html=True)
+                for tx in history[:20]:
+                    transaction_card(tx, acting_school)
 
 else:
     confs = engine.store.fbs_conferences()
     default_conf = confs.index("SEC") if "SEC" in confs else 0
-    acting_conf = st.selectbox("Conference", confs, index=default_conf)
-
-    st.markdown(f'<div class="page-title">{acting_conf} oversight</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="page-copy">Solve conference-wide problems, send one coordinated proposal, and let the affected schools negotiate and approve it inside the platform.</div>',
-        unsafe_allow_html=True,
-    )
-
-    conf_solve, conf_transactions, conf_governance, conf_schedules = st.tabs([
-        "Solve", "Transactions", "Governance", "Schedules"
-    ])
-
-    with conf_solve:
-        st.markdown("### Make conference weeks even")
-        selected_display_weeks = st.multiselect(
-            "Weeks that must be even",
-            list(range(1, 15)),
-            default=[1, 2, 3],
+    with st.sidebar:
+        st.markdown('<div class="sidebar-section">Conference</div>', unsafe_allow_html=True)
+        acting_conf = st.selectbox("Conference", confs, index=default_conf)
+        st.markdown('<div class="sidebar-section">Navigation</div>', unsafe_allow_html=True)
+        navigation = st.radio(
+            "Navigation",
+            ["Overview", "Solve", "Transactions", "Schools", "Rules"],
+            label_visibility="collapsed",
+            key="conference_nav",
         )
-        selected_weeks = [internal_week(w) for w in selected_display_weeks]
-        members = sorted(t.name for t in store.conference_members(acting_conf))
-        member_set = set(members)
-        conf_games = [g for g in season_games if g.home_team in member_set or g.away_team in member_set]
 
-        current_odd = []
-        for week in selected_weeks:
+    members = sorted(t.name for t in store.conference_members(acting_conf))
+    relevant_tx = [
+        item["payload"] for item in _tx_items(db)
+        if acting_conf in item["payload"].get("governing_conferences", [])
+        or item["payload"].get("proposer") == acting_conf
+    ]
+    pending_conf_tx = [tx for tx in relevant_tx if str(tx.get("status","")).upper() == "PENDING"]
+    render_app_header(
+        eyebrow="Conference workspace",
+        title=navigation,
+        subtitle={
+            "Overview":"Conference health, market activity and transactions requiring attention.",
+            "Solve":"Coordinate the minimum schedule changes required to reach a conference outcome.",
+            "Transactions":"Monitor school approvals, negotiations and completed transactions.",
+            "Schools":"Review member schedules without opening five separate documents.",
+            "Rules":"Set automated governance so ordinary transactions do not require brokerage.",
+        }[navigation],
+        season=int(season),
+        data_status=status_text,
+        status_class=status_class,
+        pending_count=len(pending_conf_tx),
+    )
+    render_entity_bar(acting_conf, f"{len(members)} members · {season}")
+
+    if navigation == "Overview":
+        odd_weeks = []
+        for week in range(14):
             state = engine.conference_parity(store.copy_games(), int(season), week).get(acting_conf, "")
             if str(state).startswith("ODD"):
-                current_odd.append(week)
-        if current_odd:
-            st.markdown(
-                '<div class="outcome-note">Needs repair: '
-                + ", ".join(f"Week {display_week(w)}" for w in current_odd)
-                + ".</div>",
-                unsafe_allow_html=True,
-            )
+                odd_weeks.append(week)
+        conf_needs = [
+            n for n in db_need_records(db, season=int(season))
+            if n.get("team") in set(members)
+        ]
+        completed = len([tx for tx in relevant_tx if str(tx.get("status","")).upper() == "COMPLETED"])
+        render_kpis([
+            ("Member schools", len(members), "conference workspace"),
+            ("Odd modeled weeks", len(odd_weeks), "conference availability"),
+            ("Open school needs", len(conf_needs), "buy game / A4 market"),
+            ("Pending transactions", len(pending_conf_tx), f"{completed} completed"),
+        ])
+        st.markdown('<div class="section-heading">Conference health</div>', unsafe_allow_html=True)
+        render_parity_strip(engine, acting_conf, int(season))
+        left, right = st.columns([1.2,.8])
+        with left:
+            st.markdown('<div class="section-heading">Recent activity</div>', unsafe_allow_html=True)
+            render_activity_feed(relevant_tx, limit=8)
+        with right:
+            st.markdown('<div class="section-heading">Governance</div>', unsafe_allow_html=True)
+            policy = conference_policy(db, acting_conf)
+            with st.container(border=True):
+                st.caption("Parity protection")
+                st.markdown("**On**" if policy.get("enforce_no_new_parity", True) else "**Off**")
+                st.caption("Manual conference approval")
+                st.markdown("**Required**" if policy.get("require_manual_approval", False) else "**Not required**")
 
-        with st.expander("Constraints & preferences", expanded=False):
-            rules, protected_ids, avoid_ids, context = constraint_builder(
-                db,
-                prefix=f"confsolve_{season}_{acting_conf}",
-                primary_team=members[0] if members else all_team_names[0],
-                teams=members if members else all_team_names,
-                games=conf_games,
+    elif navigation == "Solve":
+        st.markdown('<div class="section-heading">Make selected weeks even</div>', unsafe_allow_html=True)
+        with st.container(border=True):
+            selected_display_weeks = st.multiselect(
+                "Weeks that must be even", list(range(1,15)), default=[1,2,3]
             )
+            selected_weeks = [internal_week(w) for w in selected_display_weeks]
+            member_set = set(members)
+            conf_games = [
+                g for g in season_games
+                if g.home_team in member_set or g.away_team in member_set
+            ]
+            with st.expander("Constraints & preferences", expanded=False):
+                rules, protected_ids, avoid_ids, context = constraint_builder(
+                    db,
+                    prefix=f"premium_confsolve_{season}_{acting_conf}",
+                    primary_team=members[0] if members else all_team_names[0],
+                    teams=members if members else all_team_names,
+                    games=conf_games,
+                )
+            if st.button("Find best coordinated plan", type="primary"):
+                run_store = store_with_locked(store, protected_ids)
+                run_engine = AdvancedNonConferenceOptimizer(run_store, time_limit_seconds=12.0)
+                intent = Intent(
+                    action="OPTIMIZE_NATIONAL",
+                    season=int(season),
+                    target_weeks=selected_weeks,
+                    conferences=[acting_conf],
+                    conference=acting_conf,
+                    all_conferences=False,
+                    preserve_fbs_conference_parity=True,
+                    max_additional_moves=60,
+                    avoid_game_ids=sorted(avoid_ids),
+                    coach_context=context,
+                    rules=rules + rules_for_schools(db, members),
+                    summary="Make selected conference weeks even",
+                )
+                with st.spinner("Evaluating coordinated schedule paths…"):
+                    plans = run_engine.optimize_national(intent)
+                st.session_state[f"premium_conf_plan_{acting_conf}"] = {
+                    "result": plans[0] if plans else None,
+                    "store": run_store,
+                    "rules": intent.rules,
+                    "context": context,
+                    "weeks": selected_weeks,
+                }
 
-        if st.button("Solve conference problem", type="primary", use_container_width=True):
-            run_store = store_with_locked(store, protected_ids)
-            run_engine = AdvancedNonConferenceOptimizer(run_store, time_limit_seconds=12.0)
-            intent = Intent(
-                action="OPTIMIZE_NATIONAL",
-                season=int(season),
-                target_weeks=selected_weeks,
-                conferences=[acting_conf],
-                conference=acting_conf,
-                all_conferences=False,
-                preserve_fbs_conference_parity=True,
-                max_additional_moves=60,
-                avoid_game_ids=sorted(avoid_ids),
-                coach_context=context,
-                rules=rules + rules_for_schools(db, members),
-                summary="Make selected conference weeks even",
-            )
-            with st.spinner("Looking across all affected schedules and minimizing the coordinated changes…"):
-                plans = run_engine.optimize_national(intent)
-            st.session_state[f"conf_plan_{acting_conf}"] = {
-                "result": plans[0] if plans else None,
-                "store": run_store,
-                "rules": intent.rules,
-                "context": context,
-                "weeks": selected_weeks,
-            }
-
-        state = st.session_state.get(f"conf_plan_{acting_conf}")
+        state = st.session_state.get(f"premium_conf_plan_{acting_conf}")
         if state:
             plan = state.get("result")
             if plan and not bool((plan.metadata or {}).get("infeasible")):
                 run_engine = AdvancedNonConferenceOptimizer(state["store"], time_limit_seconds=12.0)
-                render_result(run_engine, plan, season=int(season), data_status=status_text, label="BEST COORDINATED PLAN")
-                render_school_impacts(plan)
-                affected = sorted({s for m in plan.moves for s in (m.home_team, m.away_team)})
-                st.markdown(
-                    f'<div class="outcome-note"><strong>{len(affected)} schools</strong> must approve. '
-                    f'The platform sends one proposal and records each Yes/No/counterproposal.</div>',
-                    unsafe_allow_html=True,
+                render_result(
+                    run_engine, plan, season=int(season),
+                    data_status=status_text, label="BEST COORDINATED PLAN"
                 )
-                if st.button("Send to all affected schools", type="primary", use_container_width=True):
+                render_school_impacts(plan)
+                if st.button("Send to all affected schools", type="primary", key=f"premium_send_conf_{acting_conf}"):
+                    affected = sorted({s for m in plan.moves for s in (m.home_team, m.away_team)})
                     objective = {
-                        "type": "CONFERENCE_EVEN",
-                        "conference": acting_conf,
-                        "target_weeks": list(state["weeks"]),
+                        "type":"CONFERENCE_EVEN",
+                        "conference":acting_conf,
+                        "target_weeks":list(state["weeks"]),
                     }
                     payload = transaction_from_solution(
-                        sol=plan,
-                        proposer=acting_conf,
-                        season=int(season),
-                        data_status=status_text,
-                        store=state["store"],
-                        conference_policies=policies,
-                        context=str(state.get("context", "")),
-                        objective=objective,
-                        rules=list(state.get("rules") or []),
+                        sol=plan, proposer=acting_conf, season=int(season),
+                        data_status=status_text, store=state["store"],
+                        conference_policies=policies, context=str(state.get("context","")),
+                        objective=objective, rules=list(state.get("rules") or []),
                     )
                     tx_id = _tx_create(db, payload)
                     _tx_action(
-            db,
-                        tx_id,
-                        actor=acting_conf,
+                        db, tx_id, actor=acting_conf,
                         action="SENT_TO_ALL_AFFECTED_SCHOOLS",
                         note=f"{len(affected)} schools asked for unanimous approval.",
                     )
-                    st.success(f"One coordinated proposal sent to {len(affected)} schools.")
+                    st.success(f"Proposal sent to {len(affected)} schools.")
             elif state:
-                st.error("No plan satisfies all selected conference outcomes and hard constraints.")
+                st.error("No plan satisfies the selected conference outcome and hard constraints.")
 
-    with conf_transactions:
-        relevant = [
-            item["payload"] for item in _tx_items(db)
-            if acting_conf in item["payload"].get("governing_conferences", [])
-            or item["payload"].get("proposer") == acting_conf
-        ]
-        if not relevant:
-            st.info("No transactions involve this conference yet.")
+    elif navigation == "Transactions":
+        if not relevant_tx:
+            render_empty("No transactions", "Coordinated proposals involving this conference will appear here.")
         else:
-            for tx in relevant:
-                tx_id = str(tx.get("transaction_id"))
-                transaction_card(tx, acting_conf)
-                status = str(tx.get("status", "PENDING")).upper()
-                approvals = dict(tx.get("school_approvals", {}))
-                if status == "PENDING":
-                    pending = [s for s, v in approvals.items() if v == "PENDING"]
-                    accepted = [s for s, v in approvals.items() if v == "ACCEPTED"]
-                    st.caption(f"{len(accepted)} accepted · {len(pending)} pending")
-                if status == "COMPLETED":
-                    st.success("Unanimous school approval complete.")
-                    with st.expander("Final confirmation", expanded=False):
-                        text = confirmation_text(tx)
-                        st.text_area("Approval record", value=text, height=200, disabled=True, key=f"conf_confirm_{tx_id}")
-                if tx.get("suggestions"):
-                    with st.expander("School counterproposals", expanded=True):
-                        st.dataframe(pd.DataFrame(tx["suggestions"]), use_container_width=True, hide_index=True)
+            active = [tx for tx in relevant_tx if str(tx.get("status","")).upper() == "PENDING"]
+            finished = [tx for tx in relevant_tx if str(tx.get("status","")).upper() != "PENDING"]
+            if active:
+                st.markdown('<div class="section-heading">Active</div>', unsafe_allow_html=True)
+                for tx in active:
+                    transaction_card(tx, acting_conf)
+            if finished:
+                st.markdown('<div class="section-heading">Completed & history</div>', unsafe_allow_html=True)
+                for tx in finished[:25]:
+                    transaction_card(tx, acting_conf)
 
-    with conf_governance:
-        policy = conference_policy(db, acting_conf)
-        enforce_parity = st.checkbox(
-            "Do not allow a school transaction to create a new conference parity issue",
-            value=bool(policy.get("enforce_no_new_parity", True)),
+    elif navigation == "Schools":
+        st.markdown('<div class="section-heading">Member schedule intelligence</div>', unsafe_allow_html=True)
+        selected_member = st.selectbox("Inspect school", members, key=f"premium_member_{acting_conf}")
+        render_schedule_strip(
+            all_games_df, selected_member, int(season),
+            authoritative=authoritative,
+            title=f"{selected_member} · {season}",
         )
-        require_manual = st.checkbox(
-            "Require conference approval after every affected school accepts",
-            value=bool(policy.get("require_manual_approval", False)),
-            help="Leave this off to make school-to-school transactions truly self-service.",
-        )
-        if st.button("Save governance", type="primary", use_container_width=True):
-            db.put("conference_policy", acting_conf, {
-                "conference": acting_conf,
-                "enforce_no_new_parity": bool(enforce_parity),
-                "require_manual_approval": bool(require_manual),
-                "auto_complete_after_school_approvals": True,
-            })
-            st.success("Governance saved.")
-        if not require_manual:
-            st.success("Self-service mode is active: unanimous school approval completes an ordinary transaction.")
-
-    with conf_schedules:
         rows = []
-        members = sorted(t.name for t in store.conference_members(acting_conf))
         for team in members:
-            games = sorted([g for g in store.games.values() if g.involves(team)], key=lambda g: g.week)
-            row = {"School": team}
+            games = sorted([g for g in store.games.values() if g.involves(team)], key=lambda g:g.week)
+            row = {"School":team}
             for w in range(14):
                 game = next((g for g in games if g.week == w), None)
                 if game:
                     opp = game.away_team if game.home_team == team else game.home_team
                     site = game.site_for(team)
-                    row[f"W{display_week(w)}"] = f"{'vs' if site == 'HOME' else '@' if site == 'AWAY' else 'N'} {opp}"
+                    row[f"W{display_week(w)}"] = f"{'vs' if site=='HOME' else '@' if site=='AWAY' else 'N'} {opp}"
                 else:
                     row[f"W{display_week(w)}"] = ""
             rows.append(row)
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True, height=650)
+        st.markdown('<div class="section-heading">Conference matrix</div>', unsafe_allow_html=True)
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True, height=600)
 
-st.caption(
-    "V7 milestone: solve the multi-school problem, send one coordinated proposal, automate counterproposals, "
-    "collect unanimous school approval, and update the schedule without the conference office brokering every call."
+    elif navigation == "Rules":
+        policy = conference_policy(db, acting_conf)
+        left, right = st.columns([.9,1.1])
+        with left:
+            st.markdown('<div class="section-heading">Governance</div>', unsafe_allow_html=True)
+            with st.container(border=True):
+                enforce_parity = st.checkbox(
+                    "Prevent new conference parity issues",
+                    value=bool(policy.get("enforce_no_new_parity", True)),
+                )
+                require_manual = st.checkbox(
+                    "Require conference approval after unanimous school approval",
+                    value=bool(policy.get("require_manual_approval", False)),
+                )
+                if st.button("Save governance", type="primary", use_container_width=True):
+                    db.put("conference_policy", acting_conf, {
+                        "conference":acting_conf,
+                        "enforce_no_new_parity":bool(enforce_parity),
+                        "require_manual_approval":bool(require_manual),
+                        "auto_complete_after_school_approvals":True,
+                    })
+                    st.success("Governance saved.")
+        with right:
+            st.markdown('<div class="section-heading">School profiles</div>', unsafe_allow_html=True)
+            profile_rows = []
+            for school in members:
+                school_rules = persistent_profile_rules(db, school)
+                profile_rows.append({
+                    "School":school,
+                    "Saved rules":len(school_rules),
+                    "Profile":"Configured" if school_rules else "Not configured",
+                })
+            st.dataframe(pd.DataFrame(profile_rows), use_container_width=True, hide_index=True)
+
+st.markdown(
+    '<div class="desktop-only-note" style="margin-top:28px;padding-top:14px;border-top:1px solid #E5EAF0">'
+    'Schedule OS · Desktop pilot · Use authoritative schedule data and durable Postgres before operational deployment.'
+    '</div>',
+    unsafe_allow_html=True,
 )
