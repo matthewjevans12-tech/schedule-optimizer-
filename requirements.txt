@@ -3,3 +3,4 @@ pandas>=2.2
 openai>=1.50
 requests>=2.32
 beautifulsoup4>=4.12
+ortools>=9.10

@@ -18,6 +18,13 @@ import requests
 import streamlit as st
 from bs4 import BeautifulSoup
 
+try:
+    from ortools.sat.python import cp_model
+    ORTOOLS_AVAILABLE = True
+except Exception:
+    cp_model = None
+    ORTOOLS_AVAILABLE = False
+
 # If Streamlit secrets are configured, expose them to the OpenAI client.
 try:
     if "OPENAI_API_KEY" in st.secrets:
@@ -506,17 +513,25 @@ class NonConferenceOptimizer:
         return sorted(uniq.values(), key=lambda s: (-s.score, len(s.moves)))[:5]
 
     def find_buy_games(self, intent: Intent) -> List[Solution]:
-        if not intent.team_a or intent.season is None or intent.target_week is None:
+        """Find public buy/guarantee-game candidates.
+
+        If the requesting school is FBS, candidates are FCS programs with a mutually
+        open week. If the requesting school is FCS, candidates are FBS programs that
+        have a mutually open week and therefore could be potential guarantee-game
+        hosts. Public data shows schedule openings only; it does not prove intent.
+        """
+        if not intent.team_a or intent.season is None:
             return []
-        host = self.store.teams.get(intent.team_a)
-        if not host or host.subdivision != "FBS":
+        requester = self.store.teams.get(intent.team_a)
+        if not requester:
             return []
         base_games = self.store.copy_games()
-        if self.store.game_for_team_week(base_games, host.name, intent.season, intent.target_week):
-            return []
-
+        weeks = [intent.target_week] if intent.target_week is not None else list(range(0, 14))
         results: List[Solution] = []
-        if self.store.needs:
+
+        # In the synthetic demo we have explicit FCS marketplace needs. Use those when
+        # the requester is an FBS school and a specific week was supplied.
+        if self.store.needs and requester.subdivision == "FBS" and intent.target_week is not None:
             for need in self.store.needs:
                 candidate = self.store.teams.get(need.team)
                 if not candidate or candidate.subdivision != "FCS":
@@ -525,33 +540,61 @@ class NonConferenceOptimizer:
                     continue
                 if need.location not in {"AWAY", "ANY"}:
                     continue
+                if self.store.game_for_team_week(base_games, requester.name, intent.season, intent.target_week):
+                    continue
                 if self.store.game_for_team_week(base_games, candidate.name, intent.season, intent.target_week):
                     continue
                 if intent.max_guarantee is not None and need.min_guarantee is not None and need.min_guarantee > intent.max_guarantee:
                     continue
                 ask = f"${need.min_guarantee:,}+" if need.min_guarantee else "not specified"
                 results.append(Solution(
-                    title=f"{candidate.name} buy-game match",
+                    title=f"Week {intent.target_week} — {candidate.name} buy-game match",
                     moves=[],
                     score=90 if need.min_guarantee is None else max(50, 100 - (need.min_guarantee / max(intent.max_guarantee or need.min_guarantee, 1)) * 25),
                     explanation=f"{candidate.name} is available in Week {intent.target_week} and is seeking an away/buy game. Minimum guarantee: {ask}.",
                 ))
-        else:
-            # Public-data fallback: identify FCS schools with no known dated game in that week.
-            # This is a candidate list, not proof that the FCS program is actively seeking a buy game.
+            return sorted(results, key=lambda s: (-s.score, s.title))[:20]
+
+        wanted_subdivision = "FCS" if requester.subdivision == "FBS" else "FBS"
+        for week in weeks:
+            if week is None:
+                continue
+            # The requesting team itself must have no known game that week.
+            if self.store.game_for_team_week(base_games, requester.name, intent.season, int(week)):
+                continue
             for candidate in self.store.teams.values():
-                if candidate.subdivision != "FCS":
+                if candidate.name == requester.name or candidate.subdivision != wanted_subdivision:
                     continue
-                if self.store.game_for_team_week(base_games, candidate.name, intent.season, intent.target_week):
+                if self.store.game_for_team_week(base_games, candidate.name, intent.season, int(week)):
                     continue
-                results.append(Solution(
-                    title=f"{candidate.name} — public-data candidate",
-                    moves=[],
-                    score=70,
-                    explanation=(f"{candidate.name} has no known dated non-conference game in Week {intent.target_week} "
-                                 "in the public snapshot. Confirm true availability and buy-game interest in Gridiron."),
-                ))
-        return sorted(results, key=lambda s: (-s.score, s.title))[:12]
+                if requester.subdivision == "FBS":
+                    title = f"Week {week} — {candidate.name} FCS candidate"
+                    explanation = (f"{requester.name} and {candidate.name} both have no known dated non-conference game in Week {week} "
+                                   f"of {intent.season}. This is a public-data candidate for an FBS-hosted buy game; confirm actual interest and guarantee terms in Gridiron.")
+                    score = 72
+                else:
+                    title = f"Week {week} — {candidate.name} potential FBS host"
+                    explanation = (f"{requester.name} and {candidate.name} both have no known dated non-conference game in Week {week} "
+                                   f"of {intent.season}. This makes {candidate.name} a public-data candidate for a guarantee/buy-game opportunity; confirm the FBS school's actual need in Gridiron.")
+                    score = 74 if candidate.is_a4 else 70
+                results.append(Solution(title=title, moves=[], score=score, explanation=explanation))
+
+        # Diversify the year-only result so one week does not consume the whole list.
+        results = sorted(results, key=lambda s: (-s.score, s.title))
+        if intent.target_week is None:
+            by_week: Dict[int, int] = {}
+            diversified: List[Solution] = []
+            for sol in results:
+                m = re.search(r"Week (\d+)", sol.title)
+                week = int(m.group(1)) if m else -1
+                if by_week.get(week, 0) >= 3:
+                    continue
+                diversified.append(sol)
+                by_week[week] = by_week.get(week, 0) + 1
+                if len(diversified) >= 20:
+                    break
+            return diversified
+        return results[:20]
 
     def find_a4_games(self, intent: Intent) -> List[Solution]:
         if not intent.team_a or intent.season is None or intent.target_week is None:
@@ -595,7 +638,7 @@ class NonConferenceOptimizer:
                 ))
         return sorted(results, key=lambda s: (-s.score, s.title))[:12]
 
-    def _explain_moves(moves: List[Move], before: int, after: int) -> str:
+    def _explain_moves(self, moves: List[Move], before: int, after: int) -> str:
         chain = " → ".join(f"{m.home_team}-{m.away_team} W{m.from_week}→W{m.to_week}" for m in moves)
         if after < before:
             parity = f"The move reduces affected FBS parity issues from {before} to {after}."
@@ -609,10 +652,449 @@ class NonConferenceOptimizer:
 
 
 
+class AdvancedNonConferenceOptimizer(NonConferenceOptimizer):
+    """CP-SAT optimization layer for Gridiron.
+
+    The LLM only translates natural language into Intent. This class is the
+    scheduling authority. When OR-Tools is available it solves the relevant
+    scheduling neighborhood as a constraint-programming problem; the legacy
+    deterministic routines remain a safe fallback for development environments
+    that do not have OR-Tools installed.
+    """
+
+    PARITY_PENALTY = 25_000
+    MOVE_PENALTY = 1_400
+    DISTANCE_PENALTY = 60
+    BALANCE_PENALTY = 5_000
+
+    def __init__(self, store: ScheduleStore, time_limit_seconds: float = 3.0):
+        super().__init__(store)
+        self.time_limit_seconds = float(time_limit_seconds)
+        self.last_solver_status = "Fallback"
+        self.last_solver_seconds = 0.0
+
+    @property
+    def engine_name(self) -> str:
+        return "OR-Tools CP-SAT" if ORTOOLS_AVAILABLE else "Deterministic fallback"
+
+    def solve(self, intent: Intent) -> List[Solution]:
+        action = (intent.action or "").upper()
+        if action == "OPTIMIZE_NATIONAL":
+            return self.optimize_national(intent)
+        if action == "BALANCE_FCS_GAMES":
+            return self.balance_fcs_games(intent)
+        if action == "BALANCE_CONTROLLED_GAMES":
+            return self.balance_controlled_games(intent)
+        if action == "OPTIMIZE_MARKET":
+            return self.optimize_market(intent)
+        if action == "MOVE_GAME":
+            return self.solve_move_game(intent)
+        if action == "MAKE_CONFERENCE_EVEN":
+            return self.solve_make_conference_even(intent)
+        if action in {"FIND_BUY_GAME", "FIND_FCS_BUY_GAME"}:
+            return self.find_buy_games(intent)
+        if action == "FIND_A4_GAME":
+            return self.find_a4_games(intent)
+        return []
+
+    def _candidate_weeks_for_cp(self, game: Game, target_week: Optional[int] = None, wide: bool = False) -> List[int]:
+        if game.locked or not game.moveable:
+            return [game.week]
+        radius = 13 if wide else 5
+        weeks = []
+        for week in range(0, 14):
+            if week == game.week:
+                weeks.append(week)
+                continue
+            if abs(week - game.week) > radius and week != target_week:
+                continue
+            if self.store.slot_allows_game(game.home_team, game.season, week) and self.store.slot_allows_game(game.away_team, game.season, week):
+                weeks.append(week)
+        if target_week is not None and target_week not in weeks:
+            if self.store.slot_allows_game(game.home_team, game.season, target_week) and self.store.slot_allows_game(game.away_team, game.season, target_week):
+                weeks.append(target_week)
+        return sorted(set(weeks))
+
+    def _base_bad_parity(self, season: int) -> Dict[Tuple[str, int], bool]:
+        base = self.store.copy_games()
+        result = {}
+        for week in range(0, 14):
+            for conf, value in self.conference_parity(base, season, week).items():
+                result[(conf, week)] = value.startswith("ODD")
+        return result
+
+    def _game_conference_coeff(self, game: Game, conference: str) -> int:
+        members = {t.name for t in self.store.conference_members(conference)}
+        if not members:
+            return 0
+        home = self.store.teams.get(game.home_team)
+        away = self.store.teams.get(game.away_team)
+        # A same-conference FBS matchup is not counted as non-conference inventory.
+        if home and away and home.subdivision == away.subdivision == "FBS" and home.conference == away.conference == conference:
+            return 0
+        return int(game.home_team in members) + int(game.away_team in members)
+
+    def _is_fbs_fcs(self, game: Game) -> bool:
+        home = self.store.teams.get(game.home_team)
+        away = self.store.teams.get(game.away_team)
+        if not home or not away:
+            return False
+        return {home.subdivision, away.subdivision} == {"FBS", "FCS"}
+
+    def _cp_optimize(self, intent: Intent, mode: str) -> List[Solution]:
+        if not ORTOOLS_AVAILABLE or intent.season is None:
+            return []
+
+        season = int(intent.season)
+        season_games = [g for g in self.store.games.values() if g.season == season and 0 <= g.week <= 13]
+        if not season_games:
+            return []
+
+        target_game = None
+        if mode == "move":
+            if not intent.team_a or not intent.team_b or intent.target_week is None:
+                return []
+            target_game = self.store.find_game(intent.team_a, intent.team_b, season)
+            if target_game is None:
+                return []
+
+        # For broad national optimization the full +/-5 week neighborhood is
+        # still only a few thousand boolean variables for a normal season.
+        wide = mode in {"national", "fcs_balance", "controlled_balance"}
+        candidate_weeks: Dict[str, List[int]] = {}
+        for game in season_games:
+            target = int(intent.target_week) if target_game and game.game_id == target_game.game_id and intent.target_week is not None else None
+            candidate_weeks[game.game_id] = self._candidate_weeks_for_cp(game, target_week=target, wide=wide)
+            if game.week not in candidate_weeks[game.game_id]:
+                candidate_weeks[game.game_id].append(game.week)
+            candidate_weeks[game.game_id] = sorted(set(candidate_weeks[game.game_id]))
+
+        model = cp_model.CpModel()
+        x: Dict[Tuple[str, int], object] = {}
+        for game in season_games:
+            vars_for_game = []
+            for week in candidate_weeks[game.game_id]:
+                var = model.NewBoolVar(f"g_{game.game_id}_w{week}")
+                x[(game.game_id, week)] = var
+                vars_for_game.append(var)
+            model.AddExactlyOne(vars_for_game)
+
+        # A school may have at most one known non-conference game in a week.
+        team_week_vars: Dict[Tuple[str, int], List[object]] = {}
+        for game in season_games:
+            for week in candidate_weeks[game.game_id]:
+                for team in (game.home_team, game.away_team):
+                    team_week_vars.setdefault((team, week), []).append(x[(game.game_id, week)])
+        for vars_list in team_week_vars.values():
+            if len(vars_list) > 1:
+                model.Add(sum(vars_list) <= 1)
+
+        # Specific requested move is a hard constraint.
+        if target_game is not None:
+            tw = int(intent.target_week)
+            if (target_game.game_id, tw) not in x:
+                return []
+            model.Add(x[(target_game.game_id, tw)] == 1)
+
+        base_bad = self._base_bad_parity(season)
+        parity_bad: Dict[Tuple[str, int], object] = {}
+        for conf in self.store.fbs_conferences():
+            members = self.store.conference_members(conf)
+            if not members:
+                continue
+            desired_remainder = len(members) % 2
+            for week in range(0, 14):
+                terms = []
+                max_count = 0
+                for game in season_games:
+                    coeff = self._game_conference_coeff(game, conf)
+                    if coeff and (game.game_id, week) in x:
+                        terms.append(coeff * x[(game.game_id, week)])
+                        max_count += coeff
+                count = model.NewIntVar(0, max(len(members), max_count), f"nc_{conf}_{week}")
+                model.Add(count == (sum(terms) if terms else 0))
+                rem = model.NewIntVar(0, 1, f"rem_{conf}_{week}")
+                model.AddModuloEquality(rem, count, 2)
+                bad = model.NewBoolVar(f"bad_{conf}_{week}")
+                if desired_remainder == 0:
+                    model.Add(bad == rem)
+                else:
+                    model.Add(bad + rem == 1)
+                parity_bad[(conf, week)] = bad
+
+                # Do not turn a currently healthy conference/week into a new
+                # parity problem unless the caller explicitly permits it.
+                if intent.preserve_fbs_conference_parity and not base_bad.get((conf, week), False):
+                    model.Add(bad == 0)
+
+        if mode == "parity":
+            if not intent.conference or intent.target_week is None:
+                return []
+            key = (intent.conference, int(intent.target_week))
+            if key not in parity_bad:
+                return []
+            model.Add(parity_bad[key] == 0)
+
+        changed_vars = []
+        distance_terms = []
+        for game in season_games:
+            current = x.get((game.game_id, game.week))
+            changed = model.NewBoolVar(f"changed_{game.game_id}")
+            if current is not None:
+                model.Add(changed + current == 1)
+            else:
+                model.Add(changed == 1)
+            changed_vars.append(changed)
+            for week in candidate_weeks[game.game_id]:
+                distance_terms.append(abs(week - game.week) * x[(game.game_id, week)])
+
+        # Keep the repair neighborhood tight for interactive responsiveness.
+        if mode == "move":
+            model.Add(sum(changed_vars) <= max(1, int(intent.max_additional_moves) + 1))
+        elif mode == "parity":
+            model.Add(sum(changed_vars) <= max(2, int(intent.max_additional_moves) + 2))
+        elif mode in {"fcs_balance", "controlled_balance"}:
+            model.Add(sum(changed_vars) <= 18)
+        elif mode == "national":
+            model.Add(sum(changed_vars) <= 30)
+
+        objective_terms = []
+        objective_terms.append(self.PARITY_PENALTY * sum(parity_bad.values()))
+        objective_terms.append(self.MOVE_PENALTY * sum(changed_vars))
+        objective_terms.append(self.DISTANCE_PENALTY * sum(distance_terms))
+
+        if mode == "fcs_balance":
+            fcs_games = [g for g in season_games if self._is_fbs_fcs(g)]
+            total = len(fcs_games)
+            target = round(total / 14) if total else 0
+            for week in range(0, 14):
+                terms = [x[(g.game_id, week)] for g in fcs_games if (g.game_id, week) in x]
+                count = model.NewIntVar(0, max(1, total), f"fcs_count_{week}")
+                model.Add(count == (sum(terms) if terms else 0))
+                dev = model.NewIntVar(0, max(1, total), f"fcs_dev_{week}")
+                model.AddAbsEquality(dev, count - target)
+                objective_terms.append(self.BALANCE_PENALTY * dev)
+
+        if mode == "controlled_balance" and intent.conference:
+            conf = intent.conference
+            members = self.store.conference_members(conf)
+            total_controlled = sum(self._game_conference_coeff(g, conf) for g in season_games)
+            target = round(total_controlled / 14) if total_controlled else 0
+            for week in range(0, 14):
+                terms = []
+                for game in season_games:
+                    coeff = self._game_conference_coeff(game, conf)
+                    if coeff and (game.game_id, week) in x:
+                        terms.append(coeff * x[(game.game_id, week)])
+                count = model.NewIntVar(0, max(len(members), total_controlled), f"controlled_{conf}_{week}")
+                model.Add(count == (sum(terms) if terms else 0))
+                dev = model.NewIntVar(0, max(len(members), total_controlled, 1), f"controlled_dev_{conf}_{week}")
+                model.AddAbsEquality(dev, count - target)
+                objective_terms.append(self.BALANCE_PENALTY * dev)
+
+        model.Minimize(sum(objective_terms))
+        solver = cp_model.CpSolver()
+        solver.parameters.max_time_in_seconds = self.time_limit_seconds
+        solver.parameters.num_search_workers = 8
+        solver.parameters.random_seed = 7
+        solver.parameters.log_search_progress = False
+
+        started = time.perf_counter()
+        status = solver.Solve(model)
+        self.last_solver_seconds = time.perf_counter() - started
+        self.last_solver_status = solver.StatusName(status)
+        if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            return []
+
+        after_games = self.store.copy_games()
+        moves: List[Move] = []
+        for game in season_games:
+            assigned = game.week
+            for week in candidate_weeks[game.game_id]:
+                if solver.Value(x[(game.game_id, week)]) == 1:
+                    assigned = week
+                    break
+            if assigned != game.week:
+                moves.append(Move(game.game_id, game.home_team, game.away_team, game.week, assigned))
+                after_games[game.game_id] = replace(game, week=assigned)
+
+        before_bad_count = sum(1 for v in base_bad.values() if v)
+        after_bad_count = self.parity_violation_count(after_games, season, range(0, 14))
+        touched = sorted(({m.from_week for m in moves} | {m.to_week for m in moves} | ({int(intent.target_week)} if intent.target_week is not None else set())))
+        parity_before: Dict[str, str] = {}
+        parity_after: Dict[str, str] = {}
+        for week in touched:
+            for conf, value in self.conference_parity(self.store.copy_games(), season, week).items():
+                parity_before[f"{conf} W{week}"] = value
+            for conf, value in self.conference_parity(after_games, season, week).items():
+                parity_after[f"{conf} W{week}"] = value
+
+        mode_label = {
+            "move": "Requested move optimized",
+            "parity": "Conference parity optimized",
+            "national": "National schedule optimized",
+            "fcs_balance": "FCS weekly distribution optimized",
+            "controlled_balance": "Controlled-game distribution optimized",
+        }.get(mode, "Schedule optimized")
+        distance = sum(abs(m.to_week - m.from_week) for m in moves)
+        score = max(0.0, min(100.0, 100.0 - 5.5 * len(moves) - 0.8 * distance - 4.0 * after_bad_count + 4.0 * max(0, before_bad_count - after_bad_count)))
+        warnings = []
+        if after_bad_count:
+            warnings.append(f"{after_bad_count} FBS conference/week parity issue(s) remain nationally after this optimization.")
+        if status == cp_model.FEASIBLE:
+            warnings.append("The solver found a high-quality feasible solution within the time limit; it did not prove global optimality.")
+        explanation = (
+            f"{mode_label} with {self.engine_name}. The solver evaluated the feasible game/week graph, "
+            f"moved {len(moves)} game(s), and changed national parity issues from {before_bad_count} to {after_bad_count}. "
+            f"Solver status: {self.last_solver_status} in {self.last_solver_seconds:.2f}s."
+        )
+        return [Solution(
+            title="Recommended optimization",
+            moves=sorted(moves, key=lambda m: (m.from_week, m.home_team, m.away_team)),
+            score=round(score, 1),
+            parity_before=parity_before,
+            parity_after=parity_after,
+            warnings=warnings,
+            explanation=explanation,
+        )]
+
+    def solve_move_game(self, intent: Intent) -> List[Solution]:
+        if ORTOOLS_AVAILABLE:
+            result = self._cp_optimize(intent, "move")
+            if result:
+                return result
+        return super().solve_move_game(intent)
+
+    def solve_make_conference_even(self, intent: Intent) -> List[Solution]:
+        if intent.season is None or intent.target_week is None or not intent.conference:
+            return []
+        current = self.conference_parity(self.store.copy_games(), int(intent.season), int(intent.target_week)).get(intent.conference, "")
+        if current.startswith("EVEN"):
+            return [Solution(
+                title="No change required",
+                moves=[],
+                score=100.0,
+                explanation=f"{intent.conference} is already even in Week {intent.target_week}: {current}.",
+            )]
+        if ORTOOLS_AVAILABLE:
+            result = self._cp_optimize(intent, "parity")
+            if result:
+                return result
+        return super().solve_make_conference_even(intent)
+
+    def optimize_national(self, intent: Intent) -> List[Solution]:
+        if ORTOOLS_AVAILABLE:
+            result = self._cp_optimize(intent, "national")
+            if result:
+                return result
+        # Fallback: surface current national health rather than silently failing.
+        if intent.season is None:
+            return []
+        bad = self.parity_violation_count(self.store.copy_games(), int(intent.season), range(0, 14))
+        return [Solution(
+            title="National optimization requires OR-Tools",
+            moves=[], score=max(0, 100 - bad * 5),
+            warnings=["OR-Tools is not installed in this runtime. Add ortools to requirements.txt for CP-SAT optimization."],
+            explanation=f"The current schedule has {bad} FBS conference/week parity issue(s).",
+        )]
+
+    def balance_fcs_games(self, intent: Intent) -> List[Solution]:
+        if ORTOOLS_AVAILABLE:
+            result = self._cp_optimize(intent, "fcs_balance")
+            if result:
+                return result
+        return self.optimize_national(intent)
+
+    def balance_controlled_games(self, intent: Intent) -> List[Solution]:
+        if not intent.conference:
+            return []
+        if ORTOOLS_AVAILABLE:
+            result = self._cp_optimize(intent, "controlled_balance")
+            if result:
+                return result
+        return self.optimize_national(intent)
+
+    def optimize_market(self, intent: Intent) -> List[Solution]:
+        """Maximum matching for explicit Gridiron needs.
+
+        Public FBSchedules data does not contain actual buy/sell intent, so real
+        production market optimization requires Gridiron's needs table. The
+        demo store exercises this path with explicit needs.
+        """
+        if intent.season is None or not self.store.needs:
+            return []
+        season = int(intent.season)
+        needs = [n for n in self.store.needs if n.season == season]
+        if not needs:
+            return []
+
+        # This market model is deliberately separate from schedule relocation:
+        # it maximizes fulfilled explicit needs while respecting known games.
+        if not ORTOOLS_AVAILABLE:
+            return []
+        model = cp_model.CpModel()
+        vars_by_need: Dict[int, List[Tuple[object, Team, Need]]] = {}
+        base_games = self.store.copy_games()
+        for i, need in enumerate(needs):
+            requester = self.store.teams.get(need.team)
+            if requester is None:
+                continue
+            wanted = None
+            if need.need_type == "FCS_BUY":
+                wanted = "FBS" if requester.subdivision == "FCS" else "FCS"
+            for candidate in self.store.teams.values():
+                if candidate.name == requester.name:
+                    continue
+                if wanted and candidate.subdivision != wanted:
+                    continue
+                if need.need_type == "A4" and (not candidate.is_a4 or not requester.is_a4 or candidate.conference == requester.conference):
+                    continue
+                if self.store.game_for_team_week(base_games, requester.name, season, need.week):
+                    continue
+                if self.store.game_for_team_week(base_games, candidate.name, season, need.week):
+                    continue
+                var = model.NewBoolVar(f"need{i}_{candidate.name}_{need.week}")
+                vars_by_need.setdefault(i, []).append((var, candidate, need))
+        for choices in vars_by_need.values():
+            model.Add(sum(v for v, _, _ in choices) <= 1)
+        # A candidate can only accept one newly proposed game in a week.
+        cand_week: Dict[Tuple[str, int], List[object]] = {}
+        for choices in vars_by_need.values():
+            for var, candidate, need in choices:
+                cand_week.setdefault((candidate.name, need.week), []).append(var)
+        for vars_list in cand_week.values():
+            model.Add(sum(vars_list) <= 1)
+        model.Maximize(sum(v for choices in vars_by_need.values() for v, _, _ in choices))
+        solver = cp_model.CpSolver()
+        solver.parameters.max_time_in_seconds = min(2.0, self.time_limit_seconds)
+        solver.parameters.num_search_workers = 8
+        started = time.perf_counter()
+        status = solver.Solve(model)
+        self.last_solver_seconds = time.perf_counter() - started
+        self.last_solver_status = solver.StatusName(status)
+        if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            return []
+        selected = []
+        for i, choices in vars_by_need.items():
+            requester = self.store.teams.get(needs[i].team) if i < len(needs) else None
+            for var, candidate, need in choices:
+                if solver.Value(var) == 1 and requester:
+                    selected.append((requester, candidate, need))
+        if not selected:
+            return []
+        lines = [f"{r.name} ↔ {c.name} · Week {n.week} · {n.need_type}" for r, c, n in selected]
+        return [Solution(
+            title=f"{len(selected)} market need{'s' if len(selected) != 1 else ''} matched",
+            moves=[], score=min(100.0, 70.0 + len(selected) * 4),
+            explanation="Explicit Gridiron needs matched with CP-SAT: " + "; ".join(lines),
+        )]
+
+
+
 INTENT_SCHEMA = {
     "type": "object",
     "properties": {
-        "action": {"type": "string", "enum": ["MOVE_GAME", "MAKE_CONFERENCE_EVEN", "FIND_BUY_GAME", "FIND_A4_GAME"]},
+        "action": {"type": "string", "enum": ["MOVE_GAME", "MAKE_CONFERENCE_EVEN", "FIND_BUY_GAME", "FIND_A4_GAME", "OPTIMIZE_NATIONAL", "BALANCE_FCS_GAMES", "BALANCE_CONTROLLED_GAMES", "OPTIMIZE_MARKET"]},
         "season": {"type": ["integer", "null"]},
         "target_week": {"type": ["integer", "null"]},
         "conference": {"type": ["string", "null"]},
@@ -635,8 +1117,12 @@ Do not solve the schedule yourself. Convert the user's request into the provided
 Definitions:
 - MOVE_GAME: user names a specific existing matchup and wants it moved to a week.
 - MAKE_CONFERENCE_EVEN: user primarily wants an FBS conference to have an even number of teams available for conference play in a week, without requiring a named specific game.
-- FIND_BUY_GAME: an FBS school needs an FCS/buy-game opponent.
+- FIND_BUY_GAME: a school is looking for a buy/guarantee game. For an FBS requester, look for FCS candidates. For an FCS requester, look for potential FBS guarantee-game hosts. target_week may be null when the user asks for options across an entire season.
 - FIND_A4_GAME: an A4 school needs an A4 nonconference opponent.
+- OPTIMIZE_NATIONAL: user asks to optimize a whole season or solve the biggest national scheduling problems.
+- BALANCE_FCS_GAMES: user wants to improve or balance the number of FBS-vs-FCS games by week.
+- BALANCE_CONTROLLED_GAMES: user wants to balance a conference's weekly non-conference/controlled-game inventory.
+- OPTIMIZE_MARKET: user asks to optimize or match the overall market / teams-needing-games report.
 For a request like 'The SEC is odd in week 2 and I need to move Georgia vs McNeese to week 2 ...', use MOVE_GAME, conference SEC, team_a Georgia, team_b McNeese, target_week 2, and preserve parity true.
 If the year is omitted, season should be null rather than guessed. Never invent teams, dates, guarantee amounts, or constraints.
 """
@@ -709,7 +1195,24 @@ def parse_locally(text: str, team_names: Iterable[str]) -> Intent:
                 value *= 1_000
             guarantee = int(value)
 
-    if ("fcs" in lower or "buy game" in lower or "buy-game" in lower) and found:
+    buy_request = bool(re.search(r"\bbuy(?:\s+(?:a|an))?\s+game\b|\bbuy-game\b|\bguarantee(?:\s+game)?\b", lower))
+    if ("optimize" in lower or "solve the season" in lower) and not found and not conference:
+        action = "OPTIMIZE_NATIONAL"
+        team_a, team_b = None, None
+        opponent_class = "ANY"
+    elif "market report" in lower or "optimize market" in lower or "teams needing games" in lower:
+        action = "OPTIMIZE_MARKET"
+        team_a, team_b = (found + [None, None])[:2]
+        opponent_class = "ANY"
+    elif ("fcs" in lower and ("per week" in lower or "by week" in lower or "balance" in lower)) and not buy_request:
+        action = "BALANCE_FCS_GAMES"
+        team_a, team_b = (found + [None, None])[:2]
+        opponent_class = "FCS"
+    elif "controlled game" in lower or "controlled games" in lower:
+        action = "BALANCE_CONTROLLED_GAMES"
+        team_a, team_b = (found + [None, None])[:2]
+        opponent_class = "ANY"
+    elif ("fcs" in lower or buy_request) and found:
         action = "FIND_BUY_GAME"
         team_a, team_b = found[0], None
         opponent_class = "FCS"
@@ -1260,133 +1763,357 @@ def _opponent_view(game: pd.Series, team: str) -> tuple[str, str, str]:
     return str(game["home_team"]), str(game.get("home_logo", "") or ""), "N" if neutral else "A"
 
 
-def _logo_html(logo: str, opponent: str, size: int = 34) -> str:
+
+def _logo_html(logo: str, opponent: str, size: int = 42) -> str:
     initials = "".join(x[0] for x in re.findall(r"[A-Za-z0-9]+", opponent)[:2]).upper() or "?"
-    if logo and logo.lower() != "nan":
-        return (f'<img src="{_html_escape(logo)}" alt="{_html_escape(opponent)} logo" style="width:{size}px;height:{size}px;object-fit:contain;display:block;margin:0 auto 3px;" onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'flex\';">'
-                f'<span style="display:none;width:{size}px;height:{size}px;border:1px solid #aaa;border-radius:50%;align-items:center;justify-content:center;margin:0 auto 3px;font-size:11px;font-weight:700;">{initials}</span>')
-    return f'<span style="display:flex;width:{size}px;height:{size}px;border:1px solid #aaa;border-radius:50%;align-items:center;justify-content:center;margin:0 auto 3px;font-size:11px;font-weight:700;">{initials}</span>'
+    fallback = (
+        f'<span class="logo-fallback" style="width:{size}px;height:{size}px">{initials}</span>'
+    )
+    if logo and str(logo).lower() != "nan":
+        return (
+            f'<img src="{_html_escape(logo)}" alt="{_html_escape(opponent)} logo" '
+            f'class="team-logo" style="width:{size}px;height:{size}px" '
+            f'onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'flex\';">'
+            f'<span class="logo-fallback" style="display:none;width:{size}px;height:{size}px">{initials}</span>'
+        )
+    return fallback
+
+
+def _site_badge(site: str) -> str:
+    labels = {"H": "HOME", "A": "AWAY", "N": "NEUTRAL"}
+    return f'<span class="site-badge site-{site.lower()}">{labels.get(site, site)}</span>'
 
 
 def render_conference_calendar(games_df: pd.DataFrame, teams_df: pd.DataFrame, season: int, conference: str) -> None:
-    members = sorted(teams_df[(teams_df["subdivision"] == "FBS") & (teams_df["conference"] == conference)]["name"].tolist())
+    members = sorted(
+        teams_df[(teams_df["subdivision"] == "FBS") & (teams_df["conference"] == conference)]["name"].tolist()
+    )
     if not members:
         st.info("No FBS schools found for that conference in the current public snapshot.")
         return
-    headers = [f'<th><div>W{w}</div><small>{_week_saturday(season,w).strftime("%b %d").replace(" 0"," ")}</small></th>' for w in range(14)]
-    rows_html = []
+
+    headers = []
+    for week in range(14):
+        sat = _week_saturday(season, week)
+        headers.append(
+            f'<th><span class="week-label">W{week}</span><span class="week-date">{sat.strftime("%b %d").replace(" 0", " ")}</span></th>'
+        )
+
     team_logo_map = {str(r["name"]): str(r.get("logo_url", "") or "") for _, r in teams_df.iterrows()}
+    rows_html = []
     for team in members:
         cells = []
         for week in range(14):
             game = _team_game_for_row(games_df, team, season, week)
             if game is None:
-                cells.append('<td class="empty">—</td>')
-            else:
-                opp, logo, site = _opponent_view(game, team)
-                short = opp if len(opp) <= 14 else opp[:12] + "…"
-                game_date = str(game.get("date", "") or "")
-                if game_date and game_date != "TBA":
-                    try: game_date = datetime.strptime(game_date, "%Y-%m-%d").strftime("%b %d").replace(" 0", " ")
-                    except Exception: pass
-                cells.append('<td class="game">' + _logo_html(logo, opp, 32) + f'<div class="opp" title="{_html_escape(opp)}">{_html_escape(short)}</div><div class="site">{site} · {_html_escape(game_date)}</div></td>')
-        row_logo = _logo_html(team_logo_map.get(team, ""), team, 24)
-        rows_html.append(f'<tr><th class="school"><div class="school-line">{row_logo}<span>{_html_escape(team)}</span></div></th>{"".join(cells)}</tr>')
-    style = """<style>
-    .gc-wrap{overflow-x:auto;border:1px solid rgba(128,128,128,.25);border-radius:10px;margin-top:.4rem}
-    .gc{border-collapse:separate;border-spacing:0;min-width:1500px;width:100%;font-size:12px}
-    .gc th,.gc td{border-right:1px solid rgba(128,128,128,.18);border-bottom:1px solid rgba(128,128,128,.18);padding:7px 4px;text-align:center;vertical-align:middle;min-width:86px}
-    .gc thead th{position:sticky;top:0;background:inherit;z-index:2;font-weight:700}.gc .school{position:sticky;left:0;background:inherit;z-index:3;min-width:150px;text-align:left;padding-left:8px;font-size:12px}.gc .school-line{display:flex;align-items:center;gap:6px}.gc .school-line img,.gc .school-line span:first-child{margin:0!important;flex:0 0 auto}
-    .gc td.empty{opacity:.35;font-size:16px}.gc .opp{font-weight:650;line-height:1.1}.gc .site{font-size:10px;opacity:.65;margin-top:2px}
-    </style>"""
-    st.markdown(style + '<div class="gc-wrap"><table class="gc"><thead><tr><th class="school">School</th>' + ''.join(headers) + '</tr></thead><tbody>' + ''.join(rows_html) + '</tbody></table></div>', unsafe_allow_html=True)
+                cells.append('<td class="empty"><span class="open-dot">•</span></td>')
+                continue
+            opp, logo, site = _opponent_view(game, team)
+            short = opp if len(opp) <= 13 else opp[:11] + "…"
+            game_date = str(game.get("date", "") or "")
+            if game_date and game_date != "TBA":
+                try:
+                    game_date = datetime.strptime(game_date, "%Y-%m-%d").strftime("%b %d").replace(" 0", " ")
+                except Exception:
+                    pass
+            cells.append(
+                '<td class="game-cell">'
+                '<div class="game-tile">'
+                + _logo_html(logo, opp, 38)
+                + f'<div class="opp" title="{_html_escape(opp)}">{_html_escape(short)}</div>'
+                + f'<div class="mini-meta"><span class="mini-site site-{site.lower()}">{site}</span><span>{_html_escape(game_date)}</span></div>'
+                + '</div></td>'
+            )
+        row_logo = _logo_html(team_logo_map.get(team, ""), team, 30)
+        rows_html.append(
+            f'<tr><th class="school"><div class="school-line">{row_logo}<span>{_html_escape(team)}</span></div></th>{"".join(cells)}</tr>'
+        )
+
+    st.markdown(
+        '<div class="calendar-shell"><div class="calendar-scroll"><table class="gc">'
+        '<thead><tr><th class="school school-head">SCHOOL</th>'
+        + ''.join(headers)
+        + '</tr></thead><tbody>'
+        + ''.join(rows_html)
+        + '</tbody></table></div></div>',
+        unsafe_allow_html=True,
+    )
+
     tba = games_df[(games_df["season"] == season) & (games_df["date"] == "TBA")]
     tba = tba[(tba["home_team"].isin(members)) | (tba["away_team"].isin(members))]
     if len(tba):
-        with st.expander(f"TBA non-conference games involving {conference} schools ({len(tba)})"):
-            st.dataframe(tba[["away_team", "home_team", "neutral", "matchup_type"]], use_container_width=True, hide_index=True)
+        with st.expander(f"{len(tba)} TBA non-conference matchup{'s' if len(tba) != 1 else ''}"):
+            st.dataframe(
+                tba[["away_team", "home_team", "neutral", "matchup_type"]],
+                use_container_width=True,
+                hide_index=True,
+            )
 
 
-def render_team_calendar(games_df: pd.DataFrame, season: int, team: str) -> None:
+def render_team_calendar(games_df: pd.DataFrame, teams_df: pd.DataFrame, season: int, team: str) -> None:
+    team_meta_rows = teams_df[teams_df["name"] == team]
+    team_logo = ""
+    conference = ""
+    subdivision = ""
+    if len(team_meta_rows):
+        meta = team_meta_rows.iloc[0]
+        team_logo = str(meta.get("logo_url", "") or "")
+        conference = str(meta.get("conference", "") or "")
+        subdivision = str(meta.get("subdivision", "") or "")
+
+    st.markdown(
+        '<div class="team-hero">'
+        f'<div>{_logo_html(team_logo, team, 72)}</div>'
+        f'<div><div class="team-hero-name">{_html_escape(team)}</div>'
+        f'<div class="team-hero-meta">{_html_escape(conference)} · {_html_escape(subdivision)} · {season}</div></div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
     cards = []
     for week in range(14):
         sat = _week_saturday(season, week)
         game = _team_game_for_row(games_df, team, season, week)
         if game is None:
-            body = '<div class="tc-open">No known non-conf game</div>'
+            body = (
+                '<div class="tc-empty-icon">＋</div>'
+                '<div class="tc-open">No known non-conference game</div>'
+                '<div class="tc-open-sub">Potential scheduling slot</div>'
+            )
+            state_class = " is-open"
         else:
             opp, logo, site = _opponent_view(game, team)
-            site_text = {"H":"HOME","A":"AWAY","N":"NEUTRAL"}[site]
             date_text = str(game.get("date", ""))
             if date_text and date_text != "TBA":
-                try: date_text = datetime.strptime(date_text, "%Y-%m-%d").strftime("%b %d").replace(" 0"," ")
-                except Exception: pass
-            body = '<div class="tc-logo">' + _logo_html(logo, opp, 48) + f'</div><div class="tc-opp">{_html_escape(opp)}</div><div class="tc-site">{site_text} · {_html_escape(date_text)}</div>'
-        cards.append(f'<div class="tc-card"><div class="tc-week">WEEK {week}</div><div class="tc-date">{sat.strftime("%b %d").replace(" 0"," ")}</div>{body}</div>')
-    style = """<style>
-    .tc-grid{display:grid;grid-template-columns:repeat(7,minmax(120px,1fr));gap:8px;margin-top:.5rem}.tc-card{border:1px solid rgba(128,128,128,.26);border-radius:10px;padding:10px;min-height:138px;text-align:center}
-    .tc-week{font-size:10px;font-weight:800;letter-spacing:.06em;opacity:.65}.tc-date{font-size:12px;font-weight:700;margin-bottom:8px}.tc-opp{font-size:13px;font-weight:750;line-height:1.15}.tc-site{font-size:10px;opacity:.65;margin-top:4px}.tc-open{font-size:11px;opacity:.38;margin-top:28px}
-    @media(max-width:900px){.tc-grid{grid-template-columns:repeat(4,minmax(115px,1fr))}}@media(max-width:560px){.tc-grid{grid-template-columns:repeat(2,minmax(120px,1fr))}}
-    </style>"""
-    st.markdown(style + '<div class="tc-grid">' + ''.join(cards) + '</div>', unsafe_allow_html=True)
+                try:
+                    date_text = datetime.strptime(date_text, "%Y-%m-%d").strftime("%A, %b %d").replace(" 0", " ")
+                except Exception:
+                    pass
+            body = (
+                '<div class="tc-logo">' + _logo_html(logo, opp, 58) + '</div>'
+                f'<div class="tc-opp">{_html_escape(opp)}</div>'
+                f'<div class="tc-date-detail">{_html_escape(date_text)}</div>'
+                + _site_badge(site)
+            )
+            state_class = ""
+        cards.append(
+            f'<div class="tc-card{state_class}"><div class="tc-card-top"><span>WEEK {week}</span><span>{sat.strftime("%b %d").replace(" 0", " ")}</span></div>{body}</div>'
+        )
+
+    st.markdown('<div class="tc-grid">' + ''.join(cards) + '</div>', unsafe_allow_html=True)
+
     tba = games_df[(games_df["season"] == season) & (games_df["date"] == "TBA")]
     tba = tba[(tba["home_team"] == team) | (tba["away_team"] == team)]
     if len(tba):
-        st.markdown("**TBA games**")
+        st.markdown('<div class="section-kicker">TBA COMMITMENTS</div>', unsafe_allow_html=True)
         for _, game in tba.iterrows():
             opp, logo, site = _opponent_view(game, team)
-            cols = st.columns([1, 5])
-            with cols[0]:
-                if logo and logo.lower() != "nan": st.image(logo, width=46)
-            with cols[1]: st.write(f"{opp} · {'Neutral' if site == 'N' else ('Home' if site == 'H' else 'Away')} · Date TBA")
+            st.markdown(
+                '<div class="tba-row">'
+                + _logo_html(logo, opp, 44)
+                + f'<div><strong>{_html_escape(opp)}</strong><br><span>{"Neutral" if site == "N" else ("Home" if site == "H" else "Away")} · Date TBA</span></div>'
+                + '</div>',
+                unsafe_allow_html=True,
+            )
 
-st.set_page_config(page_title="Gridiron Optimizer MVP", page_icon="🏈", layout="wide")
-st.title("🏈 Gridiron Optimizer — MVP")
-st.caption("Chat-first non-conference scheduling. The LLM interprets intent; the deterministic engine validates and solves.")
-with st.sidebar:
-    st.subheader("Data source")
-    source_mode = st.radio("Choose data", ["Demo", "Real public schedule data"], index=0)
-    st.caption("Real mode reads public FBSchedules future-opponents pages and caches the result for six hours.")
+
+st.set_page_config(
+    page_title="Gridiron Optimizer",
+    page_icon="🏈",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+st.markdown(r"""
+<style>
+:root{
+  --g-bg:#07101d;
+  --g-panel:#0d1827;
+  --g-panel-2:#111f31;
+  --g-border:rgba(255,255,255,.09);
+  --g-text:#f5f7fb;
+  --g-muted:#91a0b4;
+  --g-gold:#d6aa54;
+  --g-green:#38c98b;
+  --g-red:#ef6a73;
+  --g-blue:#64a8ff;
+}
+html,body,[class*="css"]{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.stApp{background:linear-gradient(180deg,#07101d 0%,#091321 55%,#07101d 100%);color:var(--g-text)}
+.block-container{max-width:1500px;padding-top:1.4rem;padding-bottom:4rem}
+header[data-testid="stHeader"]{background:rgba(7,16,29,.82);backdrop-filter:blur(12px)}
+footer{visibility:hidden}
+[data-testid="stSidebar"]{background:#0a1422;border-right:1px solid var(--g-border)}
+[data-testid="stSidebar"] .block-container{padding-top:1rem}
+
+/* Streamlit controls */
+.stSelectbox label,.stRadio label,.stTextInput label{font-size:.78rem!important;color:var(--g-muted)!important;font-weight:700!important;letter-spacing:.02em}
+[data-baseweb="select"]>div,[data-baseweb="input"]{background:#0c1725!important;border-color:var(--g-border)!important;border-radius:10px!important}
+.stTabs [data-baseweb="tab-list"]{gap:1.25rem;border-bottom:1px solid var(--g-border)}
+.stTabs [data-baseweb="tab"]{height:44px;padding:0 2px;color:#9ca9bb;font-weight:650;background:transparent}
+.stTabs [aria-selected="true"]{color:#fff!important}
+.stTabs [data-baseweb="tab-highlight"]{background:var(--g-gold)!important;height:2px!important}
+.stChatInputContainer>div{background:#0d1827!important;border:1px solid var(--g-border)!important;border-radius:14px!important}
+[data-testid="stChatMessage"]{background:transparent;border:0;padding:.35rem 0}
+[data-testid="stExpander"]{background:#0d1827;border:1px solid var(--g-border);border-radius:12px}
+[data-testid="stDataFrame"]{border:1px solid var(--g-border);border-radius:12px;overflow:hidden}
+.stAlert{border-radius:12px;border:1px solid var(--g-border)}
+
+/* Brand/header */
+.brand-row{display:flex;align-items:center;justify-content:space-between;gap:20px;margin:0 0 1rem 0}
+.brand-lockup{display:flex;align-items:center;gap:14px;min-width:0}
+.brand-mark{width:46px;height:46px;border-radius:13px;background:linear-gradient(145deg,#d6aa54,#8d6728);display:flex;align-items:center;justify-content:center;color:#07101d;font-weight:950;font-size:22px;box-shadow:0 10px 30px rgba(214,170,84,.18)}
+.brand-name{font-weight:850;letter-spacing:.05em;font-size:1.35rem;color:#fff;line-height:1}
+.brand-sub{color:var(--g-muted);font-size:.82rem;margin-top:5px}
+.brand-status{display:flex;align-items:center;gap:7px;color:#a9b6c8;font-size:.78rem;white-space:nowrap}
+.status-dot{width:8px;height:8px;border-radius:50%;background:var(--g-green);box-shadow:0 0 0 4px rgba(56,201,139,.09)}
+
+.hero{background:radial-gradient(circle at 85% 15%,rgba(214,170,84,.11),transparent 31%),linear-gradient(135deg,#0e1b2b,#0a1523);border:1px solid var(--g-border);border-radius:18px;padding:20px 22px;margin-bottom:16px;display:flex;align-items:flex-end;justify-content:space-between;gap:20px}
+.hero-kicker{font-size:.72rem;letter-spacing:.13em;color:var(--g-gold);font-weight:800;margin-bottom:7px}
+.hero-title{font-size:1.55rem;font-weight:820;letter-spacing:-.02em;line-height:1.15;color:#fff}
+.hero-copy{font-size:.84rem;color:var(--g-muted);margin-top:7px;max-width:720px;line-height:1.5}
+
+.control-shell{border:1px solid var(--g-border);background:rgba(13,24,39,.7);border-radius:14px;padding:10px 14px 2px;margin-bottom:14px}
+.metric-strip{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;margin:8px 0 16px}
+.metric-card{border:1px solid var(--g-border);background:#0b1624;border-radius:12px;padding:11px 13px}
+.metric-label{font-size:.66rem;color:#7f8ea2;font-weight:800;letter-spacing:.08em;text-transform:uppercase}
+.metric-value{font-size:1.05rem;color:#fff;font-weight:760;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.metric-sub{font-size:.68rem;color:#708096;margin-top:2px}
+
+.section-kicker{font-size:.68rem;letter-spacing:.12em;font-weight:850;color:var(--g-gold);margin:18px 0 7px}
+.section-title{font-size:1.35rem;font-weight:800;color:#fff;letter-spacing:-.015em}
+.section-copy{font-size:.8rem;color:var(--g-muted);line-height:1.5;margin:4px 0 14px}
+
+/* Conference calendar */
+.calendar-shell{border:1px solid var(--g-border);border-radius:16px;overflow:hidden;background:#0a1421}
+.calendar-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.gc{border-collapse:separate;border-spacing:0;min-width:1370px;width:100%;font-size:11px}
+.gc th,.gc td{border-right:1px solid var(--g-border);border-bottom:1px solid var(--g-border);text-align:center;vertical-align:middle}
+.gc thead th{position:sticky;top:0;z-index:4;background:#101c2b;padding:9px 4px;min-width:80px}
+.gc .school{position:sticky;left:0;z-index:5;background:#0d1827;min-width:165px;width:165px;text-align:left;padding:8px 10px}
+.gc .school-head{background:#101c2b!important;color:#7f8da0;font-size:9px;letter-spacing:.11em}
+.gc tr:hover .school,.gc tr:hover td{background-color:#101d2c}
+.school-line{display:flex;align-items:center;gap:9px;font-size:11px;font-weight:730;color:#edf2f8;white-space:nowrap}
+.team-logo{object-fit:contain;display:block;flex:0 0 auto}
+.logo-fallback{display:flex;border:1px solid rgba(255,255,255,.15);border-radius:50%;align-items:center;justify-content:center;color:#9faec1;font-size:10px;font-weight:800;flex:0 0 auto;background:#111f30}
+.week-label{display:block;color:#fff;font-size:10px;font-weight:820}.week-date{display:block;color:#738297;font-size:9px;margin-top:2px;font-weight:600}
+.gc td{padding:5px 4px;height:80px;min-width:80px;background:#0a1421}
+.gc td.empty{color:#334154;font-size:17px}.open-dot{opacity:.5}
+.game-tile{min-height:68px;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:4px 2px;border-radius:9px}
+.opp{font-weight:750;color:#f2f5f9;font-size:10px;line-height:1.1;margin-top:1px;max-width:74px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mini-meta{display:flex;gap:4px;align-items:center;font-size:8px;color:#77869a;margin-top:3px}
+.mini-site{font-weight:850;padding:1px 4px;border-radius:4px}.site-h{color:#56d19a}.site-a{color:#72b5ff}.site-n{color:#e2bb71}
+
+/* Team calendar */
+.team-hero{display:flex;align-items:center;gap:16px;padding:16px 18px;border:1px solid var(--g-border);border-radius:15px;background:linear-gradient(135deg,#0e1a29,#0a1421);margin-bottom:12px}
+.team-hero .logo-fallback{display:flex}.team-hero-name{font-size:1.35rem;font-weight:820;color:#fff}.team-hero-meta{font-size:.78rem;color:var(--g-muted);margin-top:3px}
+.tc-grid{display:grid;grid-template-columns:repeat(5,minmax(150px,1fr));gap:9px;margin-top:.5rem}
+.tc-card{border:1px solid var(--g-border);border-radius:14px;padding:11px 12px;min-height:170px;text-align:center;background:linear-gradient(180deg,#0e1a29,#0b1522);display:flex;flex-direction:column;align-items:center;justify-content:flex-start}
+.tc-card.is-open{background:#09131f;border-style:dashed;opacity:.82}
+.tc-card-top{width:100%;display:flex;justify-content:space-between;color:#718096;font-size:9px;font-weight:800;letter-spacing:.05em;margin-bottom:13px}
+.tc-logo{height:60px;display:flex;align-items:center;justify-content:center}.tc-logo .logo-fallback{display:flex}
+.tc-opp{font-size:13px;font-weight:800;color:#fff;line-height:1.15;margin-top:4px}.tc-date-detail{font-size:10px;color:#8796aa;margin:4px 0 7px}.site-badge{font-size:8px;font-weight:850;letter-spacing:.06em;padding:3px 7px;border-radius:999px;border:1px solid currentColor}.tc-empty-icon{color:#3d4d61;font-size:22px;margin-top:18px}.tc-open{font-size:10px;color:#708095;font-weight:700;margin-top:6px}.tc-open-sub{font-size:9px;color:#4e5d6f;margin-top:3px}
+.tba-row{display:flex;align-items:center;gap:11px;border:1px solid var(--g-border);background:#0c1725;border-radius:11px;padding:9px 12px;margin:6px 0;color:#f1f4f8}.tba-row span{font-size:11px;color:#7f8da0}.tba-row .logo-fallback{display:flex}
+
+/* Solution cards */
+.solution-head{display:flex;justify-content:space-between;align-items:center;gap:12px}.score-pill{border-radius:999px;padding:4px 8px;background:rgba(56,201,139,.1);color:#58d49f;font-size:.7rem;font-weight:800}
+
+@media(max-width:1000px){
+  .block-container{padding-left:1rem;padding-right:1rem}
+  .metric-strip{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .tc-grid{grid-template-columns:repeat(3,minmax(145px,1fr))}
+  .brand-status{display:none}
+}
+@media(max-width:640px){
+  .hero{padding:16px;align-items:flex-start;flex-direction:column}
+  .hero-title{font-size:1.3rem}
+  .metric-strip{grid-template-columns:1fr 1fr}
+  .tc-grid{grid-template-columns:repeat(2,minmax(130px,1fr))}
+  .gc .school{min-width:140px;width:140px}
+}
+</style>
+""", unsafe_allow_html=True)
+
+# ---- Brand ----
+st.markdown(
+    '<div class="brand-row">'
+    '<div class="brand-lockup"><div class="brand-mark">G</div><div>'
+    '<div class="brand-name">GRIDIRON</div><div class="brand-sub">Non-Conference Scheduling Intelligence</div>'
+    '</div></div>'
+    '<div class="brand-status"><span class="status-dot"></span>Optimizer online</div>'
+    '</div>',
+    unsafe_allow_html=True,
+)
+
+st.markdown(
+    '<div class="hero"><div>'
+    '<div class="hero-kicker">SCHEDULING OPERATING SYSTEM</div>'
+    '<div class="hero-title">Find the move. See the ripple effect.</div>'
+    '<div class="hero-copy">Search future non-conference inventory, keep FBS conferences schedulable, identify buy-game and A4 opportunities, and solve cascading conflicts from one place.</div>'
+    '</div></div>',
+    unsafe_allow_html=True,
+)
+
+# ---- Source + year controls ----
+st.markdown('<div class="section-kicker">WORKSPACE</div>', unsafe_allow_html=True)
+ctrl1, ctrl2 = st.columns([1.4, 1])
+with ctrl1:
+    source_mode = st.selectbox("Data source", ["Real public schedule data", "Demo"], index=0, label_visibility="visible")
+
 real_teams_df = None
 real_games_df = None
 scrape_errors = []
 if source_mode == "Real public schedule data":
-    st.warning("Public-data test mode: future schedules are tentative. The optimizer treats known non-conference games as moveable and blank dates as candidate slots. It does NOT know a school's actual Gridiron availability/need status yet.")
-    with st.spinner("Loading FBS/FCS public scheduling snapshot — first load can take 1–3 minutes..."):
-        try: real_teams_df, real_games_df, scrape_errors = scrape_fbschedules_public()
+    with st.spinner("Syncing public FBS/FCS future schedules…"):
+        try:
+            real_teams_df, real_games_df, scrape_errors = scrape_fbschedules_public()
         except Exception as exc:
-            st.error(f"The live scrape failed: {type(exc).__name__}: {exc}")
+            st.error(f"The public schedule sync failed: {type(exc).__name__}: {exc}")
             st.stop()
     if real_teams_df is None or real_teams_df.empty:
-        st.error("No team data was returned from the public scrape.")
+        st.error("No team data was returned from the public schedule sync.")
         st.stop()
     available_years = sorted(int(y) for y in real_games_df["season"].dropna().unique()) if len(real_games_df) else list(range(2027, 2038))
-    with st.sidebar:
+    with ctrl2:
         default_idx = available_years.index(2028) if 2028 in available_years else 0
-        season = st.selectbox("Active season", available_years, index=default_idx)
+        season = st.selectbox("Season", available_years, index=default_idx)
     store = build_real_store(real_teams_df, real_games_df, season)
-    with st.sidebar:
-        year_games = real_games_df[real_games_df["season"] == season]
-        st.success(f"Loaded {len(real_teams_df):,} teams / {len(year_games):,} unique {season} commitments")
-        if scrape_errors: st.warning(f"{len(scrape_errors)} team page(s) could not be read")
+    year_games = real_games_df[real_games_df["season"] == season]
 else:
     store = build_demo_store()
-    with st.sidebar:
-        season = st.selectbox("Active season", sorted({g.season for g in store.games.values()}), index=0)
-        st.caption("Demo data is synthetic and designed around the Georgia–McNeese–Tarleton use case.")
-optimizer = NonConferenceOptimizer(store)
+    with ctrl2:
+        season = st.selectbox("Season", sorted({g.season for g in store.games.values()}), index=0)
+    year_games = pd.DataFrame([g.__dict__ for g in store.games.values()])
 
-with st.sidebar:
-    st.divider()
-    st.subheader("MVP scope")
-    st.markdown("""
-- Move a non-conference game and solve displaced games
-- Protect FBS conference weekly parity
-- Find public FCS availability candidates
-- Find public A4-vs-A4 availability candidates
-- Conference and team calendar views with opponent logos
-- No contract amendment generation
-    """)
+optimizer = AdvancedNonConferenceOptimizer(store)
+
+if source_mode == "Real public schedule data":
+    fbs_count = int((real_teams_df["subdivision"] == "FBS").sum())
+    fcs_count = int((real_teams_df["subdivision"] == "FCS").sum())
+    commitments = len(year_games)
+    metrics = [
+        ("Season", str(season), "Active workspace"),
+        ("Teams", f"{len(real_teams_df):,}", f"{fbs_count} FBS · {fcs_count} FCS"),
+        ("Known games", f"{commitments:,}", "Dated + TBA commitments"),
+        ("Data status", "PUBLIC TEST", "Gridiron intent data not connected"),
+    ]
+else:
+    metrics = [
+        ("Season", str(season), "Synthetic test year"),
+        ("Teams", f"{len(store.teams):,}", "Demo universe"),
+        ("Known games", f"{len(store.games):,}", "Synthetic commitments"),
+        ("Data status", "DEMO", "Optimizer test mode"),
+    ]
+st.markdown(
+    '<div class="metric-strip">' + ''.join(
+        f'<div class="metric-card"><div class="metric-label">{_html_escape(a)}</div><div class="metric-value">{_html_escape(b)}</div><div class="metric-sub">{_html_escape(c)}</div></div>'
+        for a,b,c in metrics
+    ) + '</div>',
+    unsafe_allow_html=True,
+)
+
+if source_mode == "Real public schedule data":
+    st.caption("Public-data prototype · Blank dates are potential slots, not confirmed availability. Production Gridiron data would supply true needs, flexibility, guarantees, and moveability.")
 
 
 def parity_table(season: int) -> pd.DataFrame:
@@ -1394,24 +2121,27 @@ def parity_table(season: int) -> pd.DataFrame:
     for week in range(0, 14):
         parity = optimizer.conference_parity(store.copy_games(), season, week)
         for conference, value in parity.items():
-            rows.append({"Week": week, "Conference": conference, "Status": value})
+            status = "EVEN" if value.startswith("EVEN") else "ODD"
+            rows.append({"Week": week, "Conference": conference, "Status": status, "Detail": value})
     return pd.DataFrame(rows)
 
 
 def render_solution(sol, idx: int):
-    label = f"#{idx} — {sol.title} · Score {sol.score:.1f}"
+    label = f"#{idx}  {sol.title}"
     with st.expander(label, expanded=(idx == 1)):
-        st.write(sol.explanation)
+        st.markdown(
+            f'<div class="solution-head"><div class="section-copy" style="margin:0">{_html_escape(sol.explanation)}</div><span class="score-pill">{sol.score:.1f}</span></div>',
+            unsafe_allow_html=True,
+        )
         if sol.moves:
             df = pd.DataFrame([{
                 "Game": f"{m.away_team} @ {m.home_team}",
-                "From": f"Week {m.from_week}",
-                "To": f"Week {m.to_week}",
+                "Current": f"Week {m.from_week}",
+                "Proposed": f"Week {m.to_week}",
             } for m in sol.moves])
             st.dataframe(df, use_container_width=True, hide_index=True)
-        if sol.warnings:
-            for warning in sol.warnings:
-                st.warning(warning)
+        for warning in sol.warnings:
+            st.warning(warning)
         if sol.parity_after:
             changed = []
             keys = sorted(set(sol.parity_before) | set(sol.parity_after))
@@ -1421,123 +2151,239 @@ def render_solution(sol, idx: int):
                 if before != after:
                     changed.append({"Conference / Week": key, "Before": before, "After": after})
             if changed:
-                st.markdown("**Parity impact**")
+                st.markdown('<div class="section-kicker">PARITY IMPACT</div>', unsafe_allow_html=True)
                 st.dataframe(pd.DataFrame(changed), use_container_width=True, hide_index=True)
 
 
-tab_chat, tab_calendar, tab_health, tab_schedule, tab_needs = st.tabs(["Ask Gridiron", "Calendars", "Conference Parity", "Schedule Data", "Open Candidates"])
+# ---- Product navigation ----
+tab_chat, tab_calendar, tab_opt, tab_health, tab_schedule, tab_needs = st.tabs([
+    "Ask Gridiron", "Calendar", "Optimization Center", "Conference Health", "Schedule Data", "Open Market"
+])
 
 with tab_chat:
-    st.markdown("### What are you trying to accomplish?")
+    st.markdown('<div class="section-kicker">ASK GRIDIRON</div><div class="section-title">What are you trying to accomplish?</div>', unsafe_allow_html=True)
     if source_mode == "Demo":
-        st.caption("Try: “In 2027 the SEC is odd in Week 2. Move Georgia vs McNeese to Week 2 and figure out where to put Tarleton without creating a new FBS parity problem.”")
+        helper = "Try: Move Georgia vs McNeese to Week 2 and solve the displaced Tarleton game without creating a new FBS parity problem."
     else:
-        st.caption(f"Try a real {season} matchup from Schedule Data, or ask: ‘Get the SEC even in Week 2’ / ‘Find Alabama an FCS candidate in Week 4.’")
+        helper = f"Ask naturally — for example: ‘Get the SEC even in Week 2,’ ‘Grambling needs to buy a game in 2029,’ or ‘Find Georgia an A4 opponent in {season}.’"
+    st.markdown(f'<div class="section-copy">{_html_escape(helper)}</div>', unsafe_allow_html=True)
 
     if "messages" not in st.session_state:
         st.session_state.messages = []
-
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    prompt = st.chat_input("Describe the scheduling problem...")
+    prompt = st.chat_input("Describe the scheduling problem…")
     if prompt:
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
-
         intent, parser_name = parse_intent(prompt, store.teams.keys())
         if intent.season is None:
             intent.season = season
-
         with st.chat_message("assistant"):
-            st.caption(f"Intent parser: {parser_name}")
-            with st.expander("Interpreted scheduling request"):
-                st.json(intent.__dict__)
-
+            run_optimizer = optimizer
+            if source_mode == "Real public schedule data" and intent.season != season:
+                run_store = build_real_store(real_teams_df, real_games_df, int(intent.season))
+                run_optimizer = AdvancedNonConferenceOptimizer(run_store)
             started = time.perf_counter()
-            with st.spinner(f"Searching the {intent.season} schedule graph for the best feasible options..."):
-                solutions = optimizer.solve(intent)
+            with st.spinner(f"Searching {intent.season} scheduling options…"):
+                solutions = run_optimizer.solve(intent)
             elapsed = time.perf_counter() - started
-            st.caption(f"Optimizer search completed in {elapsed:.2f} seconds.")
+            parser_label = "AI intent" if "openai" in parser_name.lower() else "Local intent"
+            st.caption(f"{parser_label} · Optimizer {elapsed:.2f}s")
+            with st.expander("How Gridiron interpreted your request"):
+                st.json(intent.__dict__)
             if not solutions:
-                st.error("I couldn't find a feasible solution in the current scheduling data. In real-data mode, remember that TBA games have no week assignment and Gridiron-specific availability/needs are not yet loaded.")
+                st.error("No feasible result was found in the current dataset. Public data does not yet include true school intent, contract flexibility, or guarantee requirements.")
             else:
-                if intent.action == "MOVE_GAME":
-                    st.success(f"Found {len(solutions)} feasible solution{'s' if len(solutions) != 1 else ''}. Ranked by fewest moves, week displacement, and FBS parity impact.")
-                else:
-                    st.success(f"Found {len(solutions)} match/solution{'s' if len(solutions) != 1 else ''}.")
+                st.success(f"{len(solutions)} feasible option{'s' if len(solutions) != 1 else ''} found")
                 for i, sol in enumerate(solutions, start=1):
                     render_solution(sol, i)
 
 with tab_calendar:
-    st.markdown("### Non-conference calendar")
-    st.caption("Opponent logo is shown on the week/date of the known non-conference game. H = home, A = away, N = neutral. Blank cells mean no known dated non-conference game in the public snapshot.")
-    if source_mode == "Real public schedule data":
-        view_mode = st.radio("Calendar view", ["Conference", "Team"], horizontal=True)
+    st.markdown('<div class="section-kicker">CALENDAR</div><div class="section-title">Non-conference inventory at a glance</div><div class="section-copy">Opponent logos sit on the actual game week. H = home, A = away, N = neutral. Empty cells are not confirmed open dates — they are simply dates with no known public commitment.</div>', unsafe_allow_html=True)
+    if source_mode != "Real public schedule data":
+        st.info("Calendar view uses the real public scheduling dataset. Switch the data source above to Real public schedule data.")
+    else:
+        c1, c2 = st.columns([1, 2])
+        with c1:
+            view_mode = st.radio("View", ["Conference", "Team"], horizontal=True)
         if view_mode == "Conference":
             conferences = sorted(real_teams_df[(real_teams_df["subdivision"] == "FBS") & (real_teams_df["conference"] != "Unknown")]["conference"].dropna().unique())
             default_conf = conferences.index("SEC") if "SEC" in conferences else 0
-            conference = st.selectbox("Conference", conferences, index=default_conf)
-            st.markdown(f"#### {conference} · {season}")
+            with c2:
+                conference = st.selectbox("Conference", conferences, index=default_conf)
+            st.markdown(f'<div class="section-kicker">{_html_escape(conference)} · {season}</div>', unsafe_allow_html=True)
             render_conference_calendar(real_games_df, real_teams_df, season, conference)
         else:
             team_names = sorted(real_teams_df["name"].dropna().unique())
             default_team = team_names.index("Georgia") if "Georgia" in team_names else 0
-            team = st.selectbox("Team", team_names, index=default_team)
-            team_meta = real_teams_df[real_teams_df["name"] == team].iloc[0]
-            top = st.columns([1, 7])
-            with top[0]:
-                logo = str(team_meta.get("logo_url", "") or "")
-                if logo and logo.lower() != "nan": st.image(logo, width=70)
-            with top[1]:
-                st.markdown(f"#### {team} · {season}")
-                st.caption(f"{team_meta['conference']} · {team_meta['subdivision']}")
-            render_team_calendar(real_games_df, season, team)
-    else:
-        st.info("Calendar/logo view is enabled for the real public scheduling dataset. Switch Data source to Real public schedule data.")
+            with c2:
+                team = st.selectbox("Team", team_names, index=default_team)
+            render_team_calendar(real_games_df, real_teams_df, season, team)
+
+
+with tab_opt:
+    st.markdown(
+        '<div class="section-kicker">OPTIMIZATION CENTER</div>'
+        '<div class="section-title">Turn every Gridiron report into a solution</div>'
+        '<div class="section-copy">One CP-SAT engine powers the report scenarios below. It minimizes game movement, protects healthy conference/week parity, and applies the selected report objective as a mathematical optimization problem.</div>',
+        unsafe_allow_html=True,
+    )
+    engine_label = optimizer.engine_name
+    engine_state = "READY" if ORTOOLS_AVAILABLE else "FALLBACK"
+    st.markdown(
+        f'<div class="metric-strip">'
+        f'<div class="metric-card"><div class="metric-label">ENGINE</div><div class="metric-value">{_html_escape(engine_label)}</div><div class="metric-sub">Advanced constraint programming</div></div>'
+        f'<div class="metric-card"><div class="metric-label">STATUS</div><div class="metric-value">{engine_state}</div><div class="metric-sub">Interactive solve target: ≤ {optimizer.time_limit_seconds:.0f}s</div></div>'
+        f'<div class="metric-card"><div class="metric-label">OBJECTIVE</div><div class="metric-value">MINIMUM DISRUPTION</div><div class="metric-sub">Parity → moves → date distance</div></div>'
+        f'<div class="metric-card"><div class="metric-label">SEASON</div><div class="metric-value">{season}</div><div class="metric-sub">Active optimization workspace</div></div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+    if not ORTOOLS_AVAILABLE:
+        st.warning("OR-Tools is not installed in this runtime. The GitHub deployment package includes it in requirements.txt; Streamlit will install CP-SAT automatically after you commit both updated files.")
+
+    report = st.selectbox(
+        "Gridiron report / scenario",
+        [
+            "Odd / Even",
+            "Scheduled Games / Move Repair",
+            "# of Controlled Games",
+            "# of FCS Games / Week",
+            "Market Report",
+            "Teams Needing Games",
+            "Pending Games",
+            "Bye Report",
+            "Optimize National Schedule",
+        ],
+        key="optimization_report",
+    )
+
+    def _run_and_render(intent: Intent, button_key: str, label: str = "Run optimization"):
+        if st.button(label, key=button_key, type="primary", use_container_width=True):
+            started = time.perf_counter()
+            with st.spinner("Solving the feasible scheduling graph…"):
+                sols = optimizer.solve(intent)
+            elapsed = time.perf_counter() - started
+            st.caption(f"{optimizer.engine_name} · {optimizer.last_solver_status} · {elapsed:.2f}s")
+            if not sols:
+                st.error("No feasible solution was found with the currently loaded data and constraints.")
+            else:
+                for i, sol in enumerate(sols, 1):
+                    render_solution(sol, i)
+
+    conferences = optimizer.store.fbs_conferences()
+    default_sec = conferences.index("SEC") if "SEC" in conferences else 0
+
+    if report == "Odd / Even":
+        st.markdown('<div class="section-kicker">ODD / EVEN</div><div class="section-copy">Force the selected conference/week back to an even number of teams available for conference play while preventing new parity problems in weeks that are currently healthy.</div>', unsafe_allow_html=True)
+        a, b = st.columns(2)
+        with a:
+            conf = st.selectbox("Conference", conferences, index=default_sec, key="opt_parity_conf")
+        with b:
+            week = st.selectbox("Week", list(range(0, 14)), index=2, key="opt_parity_week")
+        current = optimizer.conference_parity(store.copy_games(), season, week).get(conf, "Unknown")
+        st.info(f"Current {conf} Week {week}: {current}")
+        _run_and_render(Intent(action="MAKE_CONFERENCE_EVEN", season=season, target_week=week, conference=conf, max_additional_moves=6, summary="Optimization Center odd/even"), "run_parity")
+
+    elif report == "Scheduled Games / Move Repair":
+        st.markdown('<div class="section-kicker">SCHEDULED GAMES</div><div class="section-copy">Choose a known non-conference game and force it into a new week. CP-SAT relocates any displaced games simultaneously and minimizes the full ripple effect.</div>', unsafe_allow_html=True)
+        season_games = sorted([g for g in store.games.values() if g.season == season], key=lambda g: (g.week, g.home_team, g.away_team))
+        if not season_games:
+            st.info("No dated games are loaded for this season.")
+        else:
+            labels = {f"W{g.week} · {g.away_team} @ {g.home_team}": g for g in season_games}
+            game_label = st.selectbox("Game", list(labels), key="opt_move_game")
+            target_week = st.selectbox("Move to week", list(range(0, 14)), index=min(13, labels[game_label].week + 1), key="opt_move_week")
+            g = labels[game_label]
+            _run_and_render(Intent(action="MOVE_GAME", season=season, target_week=target_week, team_a=g.home_team, team_b=g.away_team, preserve_fbs_conference_parity=True, max_additional_moves=6, summary="Optimization Center scheduled-game repair"), "run_move")
+
+    elif report == "# of Controlled Games":
+        st.markdown('<div class="section-kicker">CONTROLLED GAME DISTRIBUTION</div><div class="section-copy">Balance a conference’s weekly non-conference inventory while preserving currently healthy FBS parity. In the public-data prototype this uses known non-conference team appearances as the controlled-inventory proxy.</div>', unsafe_allow_html=True)
+        conf = st.selectbox("Conference", conferences, index=default_sec, key="opt_control_conf")
+        _run_and_render(Intent(action="BALANCE_CONTROLLED_GAMES", season=season, conference=conf, preserve_fbs_conference_parity=True, max_additional_moves=12, summary="Balance controlled games"), "run_controlled", "Optimize weekly inventory")
+
+    elif report == "# of FCS Games / Week":
+        st.markdown('<div class="section-kicker">FCS GAMES / WEEK</div><div class="section-copy">Redistribute known FBS–FCS games toward a more even weekly cadence while minimizing moves and keeping FBS conferences schedulable.</div>', unsafe_allow_html=True)
+        _run_and_render(Intent(action="BALANCE_FCS_GAMES", season=season, preserve_fbs_conference_parity=True, max_additional_moves=18, summary="Balance FCS games by week"), "run_fcs_balance", "Optimize FCS distribution")
+
+    elif report == "Optimize National Schedule":
+        st.markdown('<div class="section-kicker">NATIONAL OPTIMIZATION</div><div class="section-copy">Solve the season as one network. The objective first minimizes FBS conference/week parity failures, then minimizes games moved and distance from current dates.</div>', unsafe_allow_html=True)
+        _run_and_render(Intent(action="OPTIMIZE_NATIONAL", season=season, preserve_fbs_conference_parity=False, max_additional_moves=30, summary="Optimize national non-conference schedule"), "run_national", f"Optimize {season}")
+
+    elif report == "Market Report":
+        st.markdown('<div class="section-kicker">MARKET REPORT</div><div class="section-copy">Production mode maximizes fulfilled explicit buy/sell/A4 needs subject to mutual date availability. This requires Gridiron’s proprietary needs table; public schedule pages only show commitments, not school intent.</div>', unsafe_allow_html=True)
+        if store.needs:
+            st.dataframe(pd.DataFrame([n.__dict__ for n in store.needs if n.season == season]), use_container_width=True, hide_index=True)
+            _run_and_render(Intent(action="OPTIMIZE_MARKET", season=season, preserve_fbs_conference_parity=True, summary="Optimize market report"), "run_market", "Optimize market matches")
+        else:
+            st.info("The solver path is built, but the public-data mode has no true ‘looking to buy/sell’ flags. Once connected to Gridiron, these report rows become explicit optimization demand.")
+
+    elif report == "Teams Needing Games":
+        st.markdown('<div class="section-kicker">TEAMS NEEDING GAMES</div><div class="section-copy">This scenario needs Gridiron’s true NEED_FBS / NEED_FCS / NEED_A4 inventory. Public blank dates cannot safely be treated as a school asking for a game.</div>', unsafe_allow_html=True)
+        if store.needs:
+            st.dataframe(pd.DataFrame([n.__dict__ for n in store.needs if n.season == season]), use_container_width=True, hide_index=True)
+        else:
+            st.info("Data adapter ready: connect the Gridiron Teams Needing Games report or underlying needs table to activate national maximum matching.")
+
+    elif report == "Pending Games":
+        st.markdown('<div class="section-kicker">PENDING GAMES</div><div class="section-copy">Pending games should become soft reservations in the production model: protected more strongly than an open slot but still movable if a higher-value national solution requires it.</div>', unsafe_allow_html=True)
+        st.info("Public FBSchedules data does not expose Gridiron pending-game status. The production data adapter should map pending rows into weighted soft constraints.")
+
+    elif report == "Bye Report":
+        st.markdown('<div class="section-kicker">BYE REPORT</div><div class="section-copy">A true bye optimizer requires the complete conference + non-conference schedule. A blank non-conference week is not necessarily a bye because a conference game may occupy it.</div>', unsafe_allow_html=True)
+        st.info("The CP-SAT model is ready to accept blocked/bye/conference-game weeks from Gridiron. Public non-conference data alone is intentionally not treated as authoritative bye data.")
 
 with tab_health:
-    st.markdown("### FBS conference parity by week")
+    st.markdown('<div class="section-kicker">CONFERENCE HEALTH</div><div class="section-title">Weekly FBS scheduling parity</div><div class="section-copy">After removing teams with known dated non-conference games, is each conference left with an even number of teams available for conference play?</div>', unsafe_allow_html=True)
     df = parity_table(season)
     if len(df):
         pivot = df.pivot(index="Conference", columns="Week", values="Status")
         st.dataframe(pivot, use_container_width=True)
-    st.caption("Parity = after teams with known dated non-conference games are removed, is the remaining FBS conference inventory even for that week?")
+        odd_rows = df[df["Status"] == "ODD"]
+        if len(odd_rows):
+            st.markdown('<div class="section-kicker">ODD-WEEK FLAGS</div>', unsafe_allow_html=True)
+            st.dataframe(odd_rows[["Conference", "Week", "Detail"]], use_container_width=True, hide_index=True)
 
 with tab_schedule:
-    st.markdown("### Non-conference games")
+    st.markdown('<div class="section-kicker">SCHEDULE DATA</div><div class="section-title">Known non-conference commitments</div>', unsafe_allow_html=True)
     if source_mode == "Real public schedule data":
-        display_cols = ["date", "week", "away_team", "home_team", "neutral", "matchup_type", "away_conference", "home_conference", "source_urls"]
+        display_cols = ["date", "week", "away_team", "home_team", "neutral", "matchup_type", "away_conference", "home_conference"]
         year_df = real_games_df[real_games_df["season"] == season]
-        st.dataframe(year_df[display_cols], use_container_width=True, hide_index=True)
+        st.dataframe(year_df[display_cols], use_container_width=True, hide_index=True, height=520)
         csv_bytes = year_df.to_csv(index=False).encode("utf-8")
-        st.download_button(f"Download {season} public snapshot CSV", csv_bytes, f"gridiron_{season}_public_snapshot.csv", "text/csv")
+        st.download_button(f"Download {season} CSV", csv_bytes, f"gridiron_{season}_public_snapshot.csv", "text/csv", use_container_width=False)
         if scrape_errors:
-            with st.expander(f"Scrape warnings ({len(scrape_errors)})"):
+            with st.expander(f"Data warnings ({len(scrape_errors)})"):
                 st.code("\n".join(scrape_errors[:100]))
     else:
         games_df = pd.DataFrame([g.__dict__ for g in store.games.values()])
         st.dataframe(games_df.sort_values(["season", "week", "home_team"]), use_container_width=True, hide_index=True)
-        st.markdown("### Explicit date availability")
-        slots_df = pd.DataFrame([s.__dict__ for s in store.slots.values()])
-        st.dataframe(slots_df[slots_df["season"] == season].sort_values(["team", "week"]), use_container_width=True, hide_index=True)
 
 with tab_needs:
+    st.markdown('<div class="section-kicker">OPEN MARKET</div><div class="section-title">Potential scheduling inventory</div><div class="section-copy">Public data can identify teams with no known dated non-conference commitment. Gridiron’s production data would distinguish truly open, flexible, buy-game, A4, and blocked inventory.</div>', unsafe_allow_html=True)
     if source_mode == "Real public schedule data":
-        st.markdown("### Public availability candidates")
-        st.write("This scrape cannot tell us who *wants* a game. It can only show who has no known dated non-conference commitment in a week. Gridiron's intent/need data is the missing production layer.")
-        candidate_week = st.selectbox("Week", list(range(0, 14)), index=2)
+        candidate_week = st.select_slider("Week", options=list(range(0, 14)), value=2)
         base_games = store.copy_games()
         rows = []
         for team in store.teams.values():
             occupied = store.game_for_team_week(base_games, team.name, season, candidate_week) is not None
             if not occupied:
                 rows.append({"Team": team.name, "Subdivision": team.subdivision, "Conference": team.conference, "A4": team.is_a4})
-        st.dataframe(pd.DataFrame(rows).sort_values(["Subdivision", "Conference", "Team"]), use_container_width=True, hide_index=True)
+        cand = pd.DataFrame(rows).sort_values(["Subdivision", "Conference", "Team"])
+        k1, k2, k3 = st.columns(3)
+        with k1: subdivision_filter = st.selectbox("Level", ["All", "FBS", "FCS"])
+        with k2: conf_opts = ["All"] + sorted(cand["Conference"].dropna().unique().tolist())
+        with k2: conference_filter = st.selectbox("Conference filter", conf_opts)
+        with k3: a4_only = st.checkbox("A4 only")
+        if subdivision_filter != "All": cand = cand[cand["Subdivision"] == subdivision_filter]
+        if conference_filter != "All": cand = cand[cand["Conference"] == conference_filter]
+        if a4_only: cand = cand[cand["A4"] == True]
+        st.dataframe(cand, use_container_width=True, hide_index=True, height=520)
     else:
-        st.markdown("### Marketplace / scheduling needs")
         needs_df = pd.DataFrame([n.__dict__ for n in store.needs])
         if len(needs_df):
             st.dataframe(needs_df[needs_df["season"] == season], use_container_width=True, hide_index=True)
