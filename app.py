@@ -470,10 +470,149 @@ def render_all_years(games_df: pd.DataFrame, team: str):
 
 
 
+def _tx_items(db: WorkspaceDB) -> List[Dict[str, object]]:
+    """Transaction listing compatible with every V5+ WorkspaceDB."""
+    return db.list("transaction")
+
+
+def _tx_get(db: WorkspaceDB, tx_id: str) -> Optional[Dict[str, object]]:
+    return db.get("transaction", tx_id)
+
+
+def _tx_save(db: WorkspaceDB, tx_id: str, tx: Dict[str, object]) -> None:
+    body = dict(tx)
+    body["transaction_id"] = tx_id
+    body["updated_at"] = datetime.now().isoformat()
+    db.put("transaction", tx_id, body)
+
+
+def _tx_create(db: WorkspaceDB, payload: Dict[str, object]) -> str:
+    body = dict(payload)
+    stamp = datetime.now()
+    raw = json.dumps(body, sort_keys=True, default=str)
+    tx_id = str(body.get("transaction_id") or f"tx_{stamp.strftime('%Y%m%d%H%M%S')}_{abs(hash(raw)) % 100000:05d}")
+    body["transaction_id"] = tx_id
+    body.setdefault("created_at", stamp.isoformat())
+    body.setdefault("history", [])
+    _tx_save(db, tx_id, body)
+    return tx_id
+
+
+def _tx_action(
+    db: WorkspaceDB,
+    tx_id: str,
+    *,
+    actor: str,
+    action: str,
+    note: str = "",
+    extra: Optional[Dict[str, object]] = None,
+) -> Optional[Dict[str, object]]:
+    tx = _tx_get(db, tx_id)
+    if not tx:
+        return None
+    history = list(tx.get("history", []))
+    history.append({
+        "at": datetime.now().isoformat(),
+        "actor": actor,
+        "action": action,
+        "note": note,
+        "extra": extra or {},
+    })
+    tx["history"] = history
+    _tx_save(db, tx_id, tx)
+    return tx
+
+
+def _tx_recalculate_status(tx: Dict[str, object]) -> Dict[str, object]:
+    status = str(tx.get("status", "")).upper()
+    if status in {"REJECTED", "SUPERSEDED"}:
+        return tx
+    school_approvals = dict(tx.get("school_approvals", {}))
+    conference_approvals = dict(tx.get("conference_approvals", {}))
+    if any(str(v).upper() == "REJECTED" for v in school_approvals.values()):
+        tx["status"] = "REJECTED"
+        return tx
+    schools_done = bool(school_approvals) and all(
+        str(v).upper() == "ACCEPTED" for v in school_approvals.values()
+    )
+    conferences_done = all(
+        str(v).upper() == "ACCEPTED" for v in conference_approvals.values()
+    )
+    if schools_done and conferences_done:
+        tx["status"] = "COMPLETED"
+        tx["completed_at"] = datetime.now().isoformat()
+    else:
+        tx["status"] = "PENDING"
+    return tx
+
+
+def _tx_school_approval(
+    db: WorkspaceDB,
+    tx_id: str,
+    school: str,
+    status: str,
+    note: str = "",
+) -> Optional[Dict[str, object]]:
+    tx = _tx_get(db, tx_id)
+    if not tx:
+        return None
+    approvals = dict(tx.get("school_approvals", {}))
+    approvals[school] = str(status).upper()
+    tx["school_approvals"] = approvals
+    tx = _tx_recalculate_status(tx)
+    _tx_save(db, tx_id, tx)
+    _tx_action(
+        db, tx_id, actor=school,
+        action=f"SCHOOL_{str(status).upper()}",
+        note=note,
+    )
+    return _tx_get(db, tx_id)
+
+
+def _tx_conference_approval(
+    db: WorkspaceDB,
+    tx_id: str,
+    conference: str,
+    status: str,
+    note: str = "",
+) -> Optional[Dict[str, object]]:
+    tx = _tx_get(db, tx_id)
+    if not tx:
+        return None
+    approvals = dict(tx.get("conference_approvals", {}))
+    approvals[conference] = str(status).upper()
+    tx["conference_approvals"] = approvals
+    tx = _tx_recalculate_status(tx)
+    _tx_save(db, tx_id, tx)
+    _tx_action(
+        db, tx_id, actor=conference,
+        action=f"CONFERENCE_{str(status).upper()}",
+        note=note,
+    )
+    return _tx_get(db, tx_id)
+
+
+def _tx_set_status(
+    db: WorkspaceDB,
+    tx_id: str,
+    status: str,
+    *,
+    actor: str = "System",
+    note: str = "",
+) -> Optional[Dict[str, object]]:
+    tx = _tx_get(db, tx_id)
+    if not tx:
+        return None
+    tx["status"] = str(status).upper()
+    _tx_save(db, tx_id, tx)
+    _tx_action(db, tx_id, actor=actor, action=f"STATUS_{str(status).upper()}", note=note)
+    return _tx_get(db, tx_id)
+
+
 def completed_transactions(db: WorkspaceDB) -> List[Dict[str, object]]:
     return [
         item["payload"]
-        for item in db.list_transactions()
+        for item in _tx_items(db)
         if str(item["payload"].get("status", "")).upper() == "COMPLETED"
     ]
 
@@ -1075,8 +1214,8 @@ def try_counterproposal(
             need_type=str(objective.get("match_type", "NEW_GAME")),
             supersedes=old_tx_id,
         )
-        new_id = db.create_transaction(payload)
-        db.set_transaction_status(old_tx_id, "SUPERSEDED", actor=school, note=f"Replaced by {new_id}.")
+        new_id = _tx_create(db, payload)
+        _tx_set_status(db, old_tx_id, "SUPERSEDED", actor=school, note=f"Replaced by {new_id}.")
         return new_id, f"Feasible counterproposal created for Week {display_week(requested_week)}."
 
     # Find the original game in the current schedule.
@@ -1164,8 +1303,8 @@ def try_counterproposal(
             supersedes=old_tx_id,
         )
 
-    new_id = db.create_transaction(payload)
-    db.set_transaction_status(old_tx_id, "SUPERSEDED", actor=school, note=f"Replaced by counterproposal {new_id}.")
+    new_id = _tx_create(db, payload)
+    _tx_set_status(db, old_tx_id, "SUPERSEDED", actor=school, note=f"Replaced by counterproposal {new_id}.")
     return new_id, "A feasible revised transaction was created automatically."
 
 
@@ -1397,8 +1536,9 @@ if perspective == "School":
                                 objective=state.get("objective"),
                                 rules=list(state.get("intent").rules or []),
                             )
-                            tx_id = db.create_transaction(payload)
-                            db.record_transaction_action(
+                            tx_id = _tx_create(db, payload)
+                            _tx_action(
+            db,
                                 tx_id, actor=acting_school, action="SENT_TO_AFFECTED_SCHOOLS",
                                 note="Unanimous school approval requested."
                             )
@@ -1443,7 +1583,7 @@ if perspective == "School":
                             objective={"type": "MAKE_SCHOOL_OPEN", "school": acting_school, "week": open_week},
                             rules=rules,
                         )
-                        tx_id = db.create_transaction(payload)
+                        tx_id = _tx_create(db, payload)
                         st.success(f"Proposal {tx_id} sent to every affected school.")
 
         else:
@@ -1510,7 +1650,7 @@ if perspective == "School":
                                     conference_policies=policies,
                                     need_type=match_type,
                                 )
-                                tx_id = db.create_transaction(payload)
+                                tx_id = _tx_create(db, payload)
                                 st.success(f"Proposal {tx_id} sent to {match.metadata.get('candidate')}.")
 
     with tab_needs:
@@ -1583,7 +1723,7 @@ if perspective == "School":
 
     with tab_proposals:
         relevant = [
-            item["payload"] for item in db.list_transactions()
+            item["payload"] for item in _tx_items(db)
             if acting_school in item["payload"].get("affected_schools", [])
             or acting_school == item["payload"].get("proposer")
         ]
@@ -1601,7 +1741,7 @@ if perspective == "School":
                     c1, c2 = st.columns(2)
                     with c1:
                         if st.button("Accept", type="primary", use_container_width=True, key=f"accept_{tx_id}_{acting_school}"):
-                            updated = db.set_school_approval(tx_id, acting_school, "ACCEPTED")
+                            updated = _tx_school_approval(db, tx_id, acting_school, "ACCEPTED")
                             if updated and updated.get("status") == "COMPLETED":
                                 st.success("Unanimous approval complete. The schedule has been updated.")
                             else:
@@ -1619,7 +1759,7 @@ if perspective == "School":
                         )
                         note = st.text_input("Detail", key=f"reject_note_{tx_id}_{acting_school}")
                         if st.button("Confirm rejection", use_container_width=True, key=f"confirm_reject_{tx_id}_{acting_school}"):
-                            db.set_school_approval(tx_id, acting_school, "REJECTED", f"{reason}: {note}")
+                            _tx_school_approval(db, tx_id, acting_school, "REJECTED", f"{reason}: {note}")
                             db.add_feedback(
                                 season=int(tx.get("season")),
                                 team=acting_school,
@@ -1795,8 +1935,9 @@ else:
                         objective=objective,
                         rules=list(state.get("rules") or []),
                     )
-                    tx_id = db.create_transaction(payload)
-                    db.record_transaction_action(
+                    tx_id = _tx_create(db, payload)
+                    _tx_action(
+            db,
                         tx_id,
                         actor=acting_conf,
                         action="SENT_TO_ALL_AFFECTED_SCHOOLS",
@@ -1808,7 +1949,7 @@ else:
 
     with conf_transactions:
         relevant = [
-            item["payload"] for item in db.list_transactions()
+            item["payload"] for item in _tx_items(db)
             if acting_conf in item["payload"].get("governing_conferences", [])
             or item["payload"].get("proposer") == acting_conf
         ]

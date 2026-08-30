@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-PRODUCT_ENGINE_VERSION = "7.0.0"
+PRODUCT_ENGINE_VERSION = "7.1.0"
 
 import csv
 import io
@@ -2775,26 +2775,9 @@ def build_real_store(teams_df: pd.DataFrame, games_df: pd.DataFrame, season: int
         Slot(team=t.name, season=season, week=w, status="OPEN", location="ANY")
         for t in teams for w in range(0, 14)
     ]
-    needs: List[Need] = []
-    if needs_df is not None and len(needs_df):
-        subset = needs_df[
-            (pd.to_numeric(needs_df["season"], errors="coerce") == int(season))
-            & (needs_df["status"].astype(str).str.upper().isin(["OPEN", "ACTIVE", "HOLD"]))
-        ]
-        for _, r in subset.iterrows():
-            if pd.isna(r.get("week")):
-                continue
-            needs.append(Need(
-                team=str(r["team"]),
-                season=int(season),
-                week=int(r["week"]),
-                need_type=str(r.get("need_type", "") or "").upper(),
-                location=str(r.get("location", "ANY") or "ANY").upper(),
-                min_guarantee=None if pd.isna(r.get("min_guarantee")) else int(r.get("min_guarantee")),
-                max_guarantee=None if pd.isna(r.get("max_guarantee")) else int(r.get("max_guarantee")),
-                notes=str(r.get("notes", "") or ""),
-            ))
-    return ScheduleStore(teams, games, slots, needs=needs)
+    return ScheduleStore(teams, games, slots, needs=[])
+
+
 
 
 def build_authoritative_store(
@@ -2895,7 +2878,27 @@ def build_authoritative_store(
                 (t.name, w),
                 Slot(team=t.name, season=season, week=w, status="OPEN", location="ANY"),
             ))
-    return ScheduleStore(teams, games, slots, needs=[])
+    needs: List[Need] = []
+    if needs_df is not None and len(needs_df):
+        subset = needs_df[
+            (pd.to_numeric(needs_df["season"], errors="coerce") == int(season))
+            & (needs_df["status"].astype(str).str.upper().isin(["OPEN", "ACTIVE", "HOLD"]))
+        ]
+        for _, r in subset.iterrows():
+            raw_week = r.get("week")
+            if pd.isna(raw_week):
+                continue
+            needs.append(Need(
+                team=str(r["team"]),
+                season=int(season),
+                week=int(raw_week),
+                need_type=str(r.get("need_type", "") or "").upper(),
+                location=str(r.get("location", "ANY") or "ANY").upper(),
+                min_guarantee=None if pd.isna(r.get("min_guarantee")) else int(r.get("min_guarantee")),
+                max_guarantee=None if pd.isna(r.get("max_guarantee")) else int(r.get("max_guarantee")),
+                notes=str(r.get("notes", "") or ""),
+            ))
+    return ScheduleStore(teams, games, slots, needs=needs)
 
 
 

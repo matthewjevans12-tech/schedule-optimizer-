@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+WORKSPACE_DB_VERSION = "7.1.0"
+
 import json
 import os
 from datetime import datetime, timezone
